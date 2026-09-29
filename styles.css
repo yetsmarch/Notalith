@@ -1,0 +1,299 @@
+.workspace-leaf-content[data-type="notalith-chat"] .view-content {
+  padding: 0;
+  overflow: hidden;
+}
+
+.notalith-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  color: var(--text-normal);
+  background: var(--background-primary);
+}
+
+.notalith-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 42px;
+  padding: 0 var(--size-4-3);
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.notalith-title {
+  font-weight: var(--font-semibold);
+}
+
+.notalith-messages {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--size-4-3);
+}
+
+.notalith-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 60%;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.notalith-empty-icon {
+  width: 32px;
+  height: 32px;
+}
+
+.notalith-empty p {
+  max-width: 360px;
+  margin: 0;
+  line-height: var(--line-height-normal);
+}
+
+.notalith-message {
+  margin-bottom: var(--size-4-4);
+}
+
+.notalith-message.is-user {
+  max-width: 85%;
+  margin-left: auto;
+  padding: var(--size-4-2) var(--size-4-3);
+  border-radius: var(--radius-l);
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  white-space: pre-wrap;
+}
+
+.notalith-message.is-assistant {
+  max-width: 100%;
+}
+
+.notalith-message-body > :first-child {
+  margin-top: 0;
+}
+
+.notalith-message-body > :last-child {
+  margin-bottom: 0;
+}
+
+.notalith-thinking,
+.notalith-usage {
+  color: var(--text-faint);
+  font-size: var(--font-ui-smaller);
+}
+
+.notalith-message-context,
+.notalith-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--size-2-2);
+}
+
+.notalith-message-context {
+  margin-bottom: var(--size-2-2);
+}
+
+.notalith-context-chip,
+.notalith-attachment {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--size-2-1);
+  max-width: 100%;
+  padding: 2px var(--size-4-2);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.notalith-attachment .clickable-icon {
+  width: 18px;
+  height: 18px;
+  padding: 2px;
+}
+
+.notalith-tools {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-2-1);
+  margin: var(--size-4-2) 0;
+}
+
+.notalith-tool {
+  display: flex;
+  align-items: center;
+  gap: var(--size-4-2);
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+
+.notalith-tool.is-running .notalith-tool-icon {
+  animation: notalith-spin 1s linear infinite;
+}
+
+.notalith-tool.is-error,
+.notalith-error {
+  color: var(--text-error);
+}
+
+.notalith-error {
+  margin-top: var(--size-4-2);
+  padding: var(--size-4-2);
+  border-radius: var(--radius-s);
+  background: rgba(var(--color-red-rgb), 0.1);
+  font-size: var(--font-ui-small);
+}
+
+.notalith-composer {
+  margin: var(--size-4-2);
+  padding: var(--size-4-2);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-l);
+  background: var(--background-primary-alt);
+}
+
+.notalith-attachments.is-empty {
+  display: none;
+}
+
+.notalith-input {
+  width: 100%;
+  min-height: 64px;
+  max-height: 220px;
+  padding: var(--size-4-2);
+  resize: vertical;
+  border: 0;
+  box-shadow: none;
+  background: transparent;
+}
+
+.notalith-input:focus {
+  box-shadow: none;
+}
+
+.notalith-toolbar,
+.notalith-toolbar-group {
+  display: flex;
+  align-items: center;
+}
+
+.notalith-toolbar {
+  justify-content: space-between;
+}
+
+.notalith-toolbar-group {
+  gap: var(--size-2-1);
+}
+
+.notalith-model-menu {
+  display: inline-flex;
+  align-items: center;
+  max-width: 130px;
+  height: 20px;
+  min-width: 0;
+  padding: 0 4px;
+  overflow: hidden;
+  border: 0;
+  border-radius: var(--radius-s);
+  box-shadow: none;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: var(--font-ui-smaller);
+}
+
+.notalith-model-menu:hover {
+  background: var(--background-modifier-hover);
+}
+
+.notalith-model-menu-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notalith-model-menu-chevron {
+  display: flex;
+  margin-left: 2px;
+}
+
+.notalith-model-menu-chevron svg {
+  width: 12px;
+  height: 12px;
+}
+
+.notalith-send {
+  color: var(--interactive-accent);
+}
+
+.notalith-deployment-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--size-4-2);
+  padding: var(--size-4-2) 0;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.notalith-deployment-summary-button {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--size-4-2);
+  padding: 0;
+  border: 0;
+  box-shadow: none;
+  background: transparent;
+  color: var(--text-normal);
+  font-weight: var(--font-semibold);
+  text-align: left;
+}
+
+.notalith-deployment-summary-button:hover {
+  color: var(--text-accent);
+  background: transparent;
+}
+
+.notalith-deployment-summary-chevron {
+  display: flex;
+  color: var(--text-muted);
+  transition: transform 100ms ease-in-out;
+}
+
+.notalith-deployment-summary.is-open .notalith-deployment-summary-chevron {
+  transform: rotate(90deg);
+}
+
+.notalith-deployment-active {
+  padding: 1px var(--size-4-2);
+  border-radius: var(--radius-s);
+  background: var(--background-modifier-success);
+  color: var(--text-success);
+  font-size: var(--font-ui-smaller);
+}
+
+.notalith-deployment-body.is-collapsed {
+  display: none;
+}
+
+.notalith-settings-empty {
+  color: var(--text-muted);
+}
+
+@keyframes notalith-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 600px) {
+  .notalith-message.is-user {
+    max-width: 92%;
+  }
+
+  .notalith-composer {
+    margin: var(--size-2-3);
+  }
+}
