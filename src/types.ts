@@ -4,11 +4,33 @@ export interface DeploymentSettings {
   deploymentName: string;
 }
 
-export interface NotalithSettings {
-  azureEndpoint: string;
-  deploymentName: string;
-  deployments: DeploymentSettings[];
+export type ProviderId =
+  | "azure-foundry"
+  | "deepseek"
+  | "anthropic"
+  | "openai"
+  | "grok"
+  | "gemini"
+  | "openrouter";
+
+export interface ProviderConnection {
+  id: ProviderId;
+  endpoint: string;
   apiKeySecretId: string;
+}
+
+export interface ModelProfile {
+  id: string;
+  connectionId: ProviderId;
+  displayName: string;
+  modelId: string;
+  supportsImages?: boolean;
+}
+
+export interface NotalithSettings {
+  connections: ProviderConnection[];
+  models: ModelProfile[];
+  activeModelId: string;
   systemPrompt: string;
   includeEmbeddedImages: boolean;
   maxNoteCharacters: number;
@@ -78,6 +100,15 @@ export interface ToolCall {
   arguments: string;
 }
 
+export type ToolOutput = string | Array<Record<string, unknown>>;
+
+export type ProviderInput =
+  | { kind: "message"; message: ModelTurnInput }
+  | {
+      kind: "tool-results";
+      results: Array<{ callId: string; output: ToolOutput }>;
+    };
+
 export interface ProviderUsage {
   inputTokens?: number;
   outputTokens?: number;
@@ -91,7 +122,6 @@ export interface ProviderHandlers {
 }
 
 export interface ProviderResult {
-  responseId: string;
   toolCalls: ToolCall[];
   usage?: ProviderUsage;
 }

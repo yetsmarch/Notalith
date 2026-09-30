@@ -4,12 +4,14 @@ import type {
   ModelTurnInput,
   NotalithSettings,
   ProviderHandlers,
+  ProviderInput,
   ProviderUsage,
   ToolCall,
+  ToolOutput,
 } from "../types";
 import { NotalithError } from "../types";
-import { AzureFoundryProvider } from "../providers/azure-foundry";
-import { READ_ONLY_TOOLS } from "./tool-definitions";
+import type { ModelProvider } from "../providers/provider";
+import { MARKDOWN_WRITE_TOOLS, READ_ONLY_TOOLS } from "./tool-definitions";
 import { VaultService } from "./vault-service";
 
 export interface RuntimeHandlers {
@@ -23,16 +25,14 @@ export interface RuntimeHandlers {
 }
 
 export class LocalAgentRuntime {
-  private previousResponseId: string | undefined;
-
   constructor(
     private readonly settings: NotalithSettings,
     private readonly vault: VaultService,
-    private readonly provider: AzureFoundryProvider,
+    private readonly provider: ModelProvider,
   ) {}
 
   resetConversation(): void {
-    this.previousResponseId = undefined;
+    this.provider.resetConversation();
   }
 
   async send(
@@ -42,72 +42,89 @@ export class LocalAgentRuntime {
     signal: AbortSignal,
   ): Promise<void> {
     const input = await this.buildInput(prompt, attachments);
-    let nextInput: ModelTurnInput | Array<Record<string, unknown>> = input;
-
-    for (let round = 0; round <= this.settings.maxToolRounds; round++) {
-      if (signal.aborted) {
-        throw new NotalithError("Request cancelled.", "cancelled");
-      }
-
-      const toolCalls: ToolCall[] = [];
-      const providerHandlers: ProviderHandlers = {
-        onTextDelta: handlers.onTextDelta,
-        onToolCall: (call) => toolCalls.push(call),
-        onUsage: handlers.onUsage,
-      };
-
-      const result = await this.provider.respond(
-        nextInput,
-        READ_ONLY_TOOLS,
-        providerHandlers,
-        signal,
-        this.previousResponseId,
+    if (input.images.length && !this.provider.supportsImages) {
+      throw new NotalithError(
+        "The selected model does not support image input.",
+        "tool",
       );
-      this.previousResponseId = result.responseId;
+    }
+    let nextInput: ProviderInput = { kind: "message", message: input };
+    const tools = [
+      ...(this.provider.supportsImageToolResults && this.provider.supportsImages
+        ? READ_ONLY_TOOLS
+        : READ_ONLY_TOOLS.filter((tool) => tool.name !== "read_image")),
+      ...MARKDOWN_WRITE_TOOLS,
+    ];
 
-      if (toolCalls.length === 0) return;
-      if (round === this.settings.maxToolRounds) {
-        throw new NotalithError(
-          `Tool round limit (${this.settings.maxToolRounds}) reached.`,
-          "tool",
-        );
-      }
-
-      const outputs: Array<Record<string, unknown>> = [];
-      for (const call of toolCalls) {
-        handlers.onToolActivity({
-          name: call.name,
-          status: "running",
-          summary: "Running read-only vault tool...",
-        });
-        try {
-          const output = await this.executeTool(call);
-          outputs.push({
-            type: "function_call_output",
-            call_id: call.callId,
-            output,
-          });
-          handlers.onToolActivity({
-            name: call.name,
-            status: "complete",
-            summary: this.toolSummary(call),
-          });
-        } catch (error) {
-          const message =
-            error instanceof Error ? error.message : String(error);
-          outputs.push({
-            type: "function_call_output",
-            call_id: call.callId,
-            output: JSON.stringify({ error: message }),
-          });
-          handlers.onToolActivity({
-            name: call.name,
-            status: "error",
-            summary: message,
-          });
+    try {
+      for (let round = 0; round <= this.settings.maxToolRounds; round++) {
+        if (signal.aborted) {
+          throw new NotalithError("Request cancelled.", "cancelled");
         }
+
+        const toolCalls: ToolCall[] = [];
+        const providerHandlers: ProviderHandlers = {
+          onTextDelta: (delta) => handlers.onTextDelta(delta),
+          onToolCall: (call) => toolCalls.push(call),
+          onUsage: (usage) => handlers.onUsage(usage),
+        };
+
+        await this.provider.respond(nextInput, tools, providerHandlers, signal);
+
+        if (toolCalls.length === 0) {
+          this.provider.finishTurn();
+          return;
+        }
+        if (round === this.settings.maxToolRounds) {
+          throw new NotalithError(
+            `Tool round limit (${this.settings.maxToolRounds}) reached.`,
+            "tool",
+          );
+        }
+
+        const outputs: Array<{ callId: string; output: ToolOutput }> = [];
+        for (const call of toolCalls) {
+          if (signal.aborted) {
+            throw new NotalithError("Request cancelled.", "cancelled");
+          }
+          if (!tools.some((tool) => tool.name === call.name)) {
+            throw new NotalithError(
+              `Model requested an unavailable tool: ${call.name}.`,
+              "tool",
+            );
+          }
+          handlers.onToolActivity({
+            name: call.name,
+            status: "running",
+            summary: "Running vault tool...",
+          });
+          try {
+            const output = await this.executeTool(call, signal);
+            outputs.push({ callId: call.callId, output });
+            handlers.onToolActivity({
+              name: call.name,
+              status: "complete",
+              summary: this.toolSummary(call),
+            });
+          } catch (error) {
+            const message =
+              error instanceof Error ? error.message : String(error);
+            outputs.push({
+              callId: call.callId,
+              output: JSON.stringify({ error: message }),
+            });
+            handlers.onToolActivity({
+              name: call.name,
+              status: "error",
+              summary: message,
+            });
+          }
+        }
+        nextInput = { kind: "tool-results", results: outputs };
       }
-      nextInput = outputs;
+    } catch (error) {
+      this.provider.abortTurn();
+      throw error;
     }
   }
 
@@ -161,15 +178,48 @@ export class LocalAgentRuntime {
 
   private async executeTool(
     call: ToolCall,
+    signal: AbortSignal,
   ): Promise<string | Array<Record<string, unknown>>> {
     let args: Record<string, unknown>;
     try {
-      args = JSON.parse(call.arguments) as Record<string, unknown>;
+      const parsed: unknown = JSON.parse(call.arguments);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("Arguments must be an object.");
+      }
+      args = parsed as Record<string, unknown>;
     } catch {
       throw new Error(`Invalid JSON arguments for ${call.name}.`);
     }
 
     switch (call.name) {
+      case "create_note":
+        return JSON.stringify({
+          path: await this.vault.createMarkdownNote(
+            this.requiredString(args, "path"),
+            this.stringArgument(args, "content"),
+            signal,
+          ),
+          action: "created",
+        });
+      case "append_note":
+        return JSON.stringify({
+          path: await this.vault.appendMarkdownNote(
+            this.requiredString(args, "path"),
+            this.requiredString(args, "content", false),
+            signal,
+          ),
+          action: "appended",
+        });
+      case "replace_note_text":
+        return JSON.stringify({
+          path: await this.vault.replaceMarkdownText(
+            this.requiredString(args, "path"),
+            this.requiredString(args, "oldText", false),
+            this.stringArgument(args, "newText"),
+            signal,
+          ),
+          action: "replaced",
+        });
       case "read_note": {
         const path = this.requiredString(args, "path");
         return JSON.stringify(
@@ -234,18 +284,32 @@ export class LocalAgentRuntime {
     try {
       const args = JSON.parse(call.arguments) as Record<string, unknown>;
       const subject = args.path ?? args.query ?? args.folder;
-      return subject ? `${call.name}: ${String(subject)}` : call.name;
+      return typeof subject === "string" && subject
+        ? `${call.name}: ${subject}`
+        : call.name;
     } catch {
       return call.name;
     }
   }
 
-  private requiredString(args: Record<string, unknown>, key: string): string {
+  private requiredString(
+    args: Record<string, unknown>,
+    key: string,
+    trim = true,
+  ): string {
     const value = args[key];
     if (typeof value !== "string" || !value.trim()) {
       throw new Error(`${key} must be a non-empty string.`);
     }
-    return value.trim();
+    return trim ? value.trim() : value;
+  }
+
+  private stringArgument(args: Record<string, unknown>, key: string): string {
+    const value = args[key];
+    if (typeof value !== "string") {
+      throw new Error(`${key} must be a string.`);
+    }
+    return value;
   }
 
   private optionalString(

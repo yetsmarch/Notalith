@@ -10,6 +10,7 @@ import {
 } from "obsidian";
 import type { ChatMessage, ContextAttachment, ProviderUsage } from "../types";
 import type NotalithPlugin from "../main";
+import { PROVIDER_IDS, PROVIDER_NAMES } from "../services/provider-settings";
 
 export const NOTALITH_VIEW_TYPE = "notalith-chat";
 
@@ -57,6 +58,9 @@ export class NotalithChatView extends ItemView {
   private textarea: HTMLTextAreaElement | null = null;
   private sendButton: HTMLButtonElement | null = null;
   private abortController: AbortController | null = null;
+  private modelSelect: HTMLElement | null = null;
+  private shownModelId = "";
+  private shownConversationEpoch = 0;
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -87,6 +91,22 @@ export class NotalithChatView extends ItemView {
 
   focusInput(): void {
     this.textarea?.focus();
+  }
+
+  startNewChat(): void {
+    this.newChat();
+  }
+
+  refreshModelMenu(): void {
+    if (
+      this.shownConversationEpoch !== this.plugin.conversationEpoch ||
+      this.shownModelId !== this.plugin.settings.activeModelId
+    ) {
+      this.newChat();
+    } else if (this.modelSelect) {
+      this.modelSelect.empty();
+      this.renderModelSelect(this.modelSelect);
+    }
   }
 
   private renderShell(): void {
@@ -154,7 +174,12 @@ export class NotalithChatView extends ItemView {
     const responseActions = toolbar.createDiv({
       cls: "notalith-toolbar-group notalith-response-actions",
     });
-    this.renderDeploymentSelect(responseActions);
+    this.modelSelect = responseActions.createDiv({
+      cls: "notalith-model-select",
+    });
+    this.shownModelId = this.plugin.settings.activeModelId;
+    this.shownConversationEpoch = this.plugin.conversationEpoch;
+    this.renderModelSelect(this.modelSelect);
     this.sendButton = this.iconButton(
       responseActions,
       "send",
@@ -165,50 +190,66 @@ export class NotalithChatView extends ItemView {
     this.renderAttachments();
   }
 
-  private renderDeploymentSelect(parent: HTMLElement): void {
-    const deployments = this.plugin.settings.deployments;
-    const current = deployments.find(
-      (deployment) =>
-        deployment.deploymentName === this.plugin.settings.deploymentName,
-    );
+  private renderModelSelect(parent: HTMLElement): void {
+    const models = this.plugin.settings.models.filter((model) => model.modelId);
+    const current = this.plugin.getActiveModel();
     const button = parent.createEl("button", {
       cls: "notalith-model-menu",
       attr: {
         type: "button",
-        "aria-label": "Select model deployment",
-        title: "Select model deployment",
+        "aria-label": "Select model",
+        title: "Select model",
       },
     });
     button.createSpan({
       cls: "notalith-model-menu-label",
-      text: current?.displayName || current?.deploymentName || "Select model",
+      text: current
+        ? `${PROVIDER_NAMES[current.connectionId]} · ${current.displayName || current.modelId}`
+        : "Select model",
     });
     const chevron = button.createSpan({
       cls: "notalith-model-menu-chevron",
     });
     setIcon(chevron, "chevron-down");
-    button.disabled = deployments.length === 0;
     button.addEventListener("click", (event) => {
       event.preventDefault();
       if (this.abortController) {
-        new Notice("Stop the current response before switching deployments.");
+        new Notice("Stop the current response before switching models.");
         return;
       }
       const menu = new Menu();
-      menu.addItem((item) => item.setTitle("Model").setIsLabel(true));
-      for (const deployment of this.plugin.settings.deployments) {
+      if (models.length === 0) {
         menu.addItem((item) =>
-          item
-            .setTitle(deployment.displayName || deployment.deploymentName)
-            .setChecked(
-              deployment.deploymentName === this.plugin.settings.deploymentName,
-            )
-            .onClick(async () => {
-              await this.plugin.selectDeployment(deployment.deploymentName);
-              this.newChat();
-              new Notice(`Using model: ${deployment.displayName}`);
-            }),
+          item.setTitle("Add a model in plugin settings").setIsLabel(true),
         );
+      }
+      for (const providerId of PROVIDER_IDS) {
+        const providerModels = models.filter(
+          (model) => model.connectionId === providerId,
+        );
+        if (!providerModels.length) continue;
+        menu.addItem((item) =>
+          item.setTitle(PROVIDER_NAMES[providerId]).setIsLabel(true),
+        );
+        for (const model of providerModels) {
+          menu.addItem((item) =>
+            item
+              .setTitle(model.displayName || model.modelId)
+              .setChecked(model.id === this.plugin.settings.activeModelId)
+              .onClick(async () => {
+                try {
+                  await this.plugin.selectModel(model.id);
+                  new Notice(
+                    `Using model: ${PROVIDER_NAMES[providerId]} · ${model.displayName || model.modelId}`,
+                  );
+                } catch (error) {
+                  new Notice(
+                    error instanceof Error ? error.message : String(error),
+                  );
+                }
+              }),
+          );
+        }
       }
       menu.showAtMouseEvent(event);
       button.blur();
@@ -234,8 +275,11 @@ export class NotalithChatView extends ItemView {
   private async send(): Promise<void> {
     const prompt = this.textarea?.value.trim() ?? "";
     if (!prompt || this.abortController) return;
-    if (!this.plugin.isConfigured()) {
-      new Notice("Configure Azure Foundry in Notalith settings.");
+    const runtime = this.plugin.runtime;
+    if (!this.plugin.isConfigured() || !runtime) {
+      new Notice(
+        "Configure a model, endpoint, and API key in Notalith settings.",
+      );
       return;
     }
 
@@ -268,7 +312,7 @@ export class NotalithChatView extends ItemView {
     ) as HTMLElement | null;
 
     try {
-      await this.plugin.runtime.send(
+      await runtime.send(
         prompt,
         userMessage.attachments ?? [],
         {
@@ -353,9 +397,7 @@ export class NotalithChatView extends ItemView {
     message: UiChatMessage,
   ): void {
     if (!messageEl) return;
-    let section = messageEl.querySelector(
-      ".notalith-tools",
-    ) as HTMLElement | null;
+    let section = messageEl.querySelector<HTMLElement>(".notalith-tools");
     if (!section) section = messageEl.createDiv({ cls: "notalith-tools" });
     section.empty();
 
@@ -382,7 +424,7 @@ export class NotalithChatView extends ItemView {
     usage: ProviderUsage,
   ): void {
     if (!messageEl || !usage.totalTokens) return;
-    let el = messageEl.querySelector(".notalith-usage") as HTMLElement | null;
+    let el = messageEl.querySelector<HTMLElement>(".notalith-usage");
     if (!el) el = messageEl.createDiv({ cls: "notalith-usage" });
     el.setText(`${usage.totalTokens.toLocaleString()} tokens`);
   }
@@ -510,7 +552,7 @@ export class NotalithChatView extends ItemView {
 
   private newChat(): void {
     this.abortController?.abort();
-    this.plugin.runtime.resetConversation();
+    this.plugin.runtime?.resetConversation();
     this.messages = [];
     this.attachments = [];
     this.renderShell();

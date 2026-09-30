@@ -3,7 +3,7 @@
   "name": "Notalith",
   "version": "0.1.0",
   "minAppVersion": "1.11.4",
-  "description": "Chat with Azure Foundry models using notes and images from your vault.",
+  "description": "Chat with AI models to search, read, and edit Markdown notes in your vault.",
   "author": "wenytang-ms",
   "isDesktopOnly": false
 }

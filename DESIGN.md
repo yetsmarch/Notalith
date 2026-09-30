@@ -6,7 +6,7 @@ tags:
   - project/notalith
   - design
   - obsidian
-  - azure-foundry
+  - model-providers
 aliases:
   - Notalith Architecture
 ---
@@ -17,7 +17,7 @@ aliases:
 
 Notalith is a desktop- and mobile-compatible Obsidian plugin that connects large language models to the current Obsidian vault through public Obsidian APIs.
 
-The first implementation uses a **direct model connection with a local tool loop**:
+The current implementation uses a **direct model connection with a local Vault tool loop**:
 
 ```text
 Obsidian UI
@@ -27,14 +27,19 @@ Local agent runtime inside the plugin
     |                         |
     |                         +--> Obsidian tools
     |                              - read/search notes
-    |                              - read embedded images
-    |                              - edit/create/move files
+    |                              - read images and Office documents
     |                              - inspect links/tags/frontmatter
+    |                              - create/append/edit Markdown notes
     |
     +--> Model provider adapter
          - Azure Foundry / Azure OpenAI Responses API
-         - optional OpenAI-compatible providers
+         - Anthropic Claude Messages API
+         - Gemini native generateContent API
+         - Chat Completions for DeepSeek, OpenAI, Grok, and OpenRouter
 ```
+
+> [!note] Current implementation and future design
+> The current code uses an Obsidian `ItemView`, `LocalAgentRuntime`, read tools, and three basic Markdown write tools. Sections describing React, additional write operations, semantic search, conversation persistence, or additional limits below are proposals, not implemented features. [ROADMAP.md](ROADMAP.md) tracks the editing scope and remaining work.
 
 The plugin must not require Node.js, a local CLI, `child_process`, Electron APIs, or an ACP process for its core feature set. This allows the same architecture to run in Obsidian Desktop, iOS, and Android.
 
@@ -48,12 +53,12 @@ The plugin must not require Node.js, a local CLI, `child_process`, Electron APIs
 1. Support Obsidian Desktop, iOS, and Android from one codebase.
 2. Expose useful public Obsidian APIs to an LLM through explicit, typed tools.
 3. Read Markdown notes, metadata, links, selections, images, and supported attachments from the current vault.
-4. Safely create, edit, move, rename, and delete vault content with user approval.
+4. Safely create and edit Markdown notes within the Vault; consider structural operations separately.
 5. Support multimodal models by sending Vault images as image input.
-6. Support Azure Foundry model deployments, initially through the Azure OpenAI Responses API.
+6. Support Azure Foundry, Claude, Gemini, DeepSeek, OpenAI, Grok, and OpenRouter through provider-specific adapters and shared chat/tool contracts.
 7. Stream model responses and tool activity into an Obsidian-native chat UI.
 8. Keep model-provider logic independent from Vault and UI logic.
-9. Preserve user control through permissions, previews, limits, and audit history.
+9. Preserve user control through path restrictions, visible tool activity, and future recovery options.
 10. Avoid private or undocumented Obsidian APIs.
 
 ### 2.2 Secondary goals
@@ -76,7 +81,7 @@ The initial version will not:
 - Upload the whole vault automatically.
 - Require Azure Foundry Agent Service.
 - Treat a model deployment as trusted code.
-- Automatically approve destructive or external actions.
+- Expose deletion, whole-note overwrite, or unrestricted external actions as model tools.
 - Implement OneDrive or SharePoint access outside files already present in the vault.
 
 ## 4. Target platforms
@@ -107,31 +112,29 @@ The chat view contains:
 - Conversation history.
 - Streaming assistant output.
 - Tool-call cards with status and result summaries.
-- Permission prompts.
 - Text input.
-- Note, folder, image, and file context attachments.
-- Model and deployment selector.
+- Note, editor-selection, image, and Office-file attachments.
+- A **Provider · model** button beside Send. Its menu groups configured models by provider; selecting one switches the provider and starts a new conversation.
 - Stop-generation button.
-- Context usage and estimated cost indicators when available.
+- Token usage when provided by the model API.
+
+Settings use a Provider dropdown to show only that provider's endpoint, API key, and model profiles. Navigating settings does not change the active chat provider. A model appears in the chat menu after its ID is configured; sending also requires a saved key.
 
 ### 5.2 Context selection
 
-Users can provide context through:
+Current chat context includes an explicitly attached current note, editor selection, or chosen Vault note, image, or Office document. Embedded images in an attached Markdown note can be included through settings; the model may also invoke available read-only Vault tools. Further proposed context mechanisms include:
 
 - `@` mention of a note.
 - `@` mention of a folder.
-- Current note.
-- Current editor selection.
 - Drag-and-drop from the Vault file explorer.
 - Paste or drag-and-drop of an image.
-- Embedded images referenced by an attached Markdown note.
 - Explicit semantic search results.
 
-No note or attachment is sent merely because it is open. The user must attach it, enable an explicit context option, or approve a tool call that reads it.
+No note or attachment is sent merely because it is open. The user must attach it or enable an explicit context option; read-only model tool calls can also retrieve Vault content without a separate approval step.
 
 ### 5.3 Inline actions
 
-The plugin provides commands for:
+Future command ideas include:
 
 - Ask about selection.
 - Explain selection.
@@ -143,96 +146,54 @@ The plugin provides commands for:
 - Attach current note to chat.
 - Open a new chat.
 
-### 5.4 Write review
+### 5.4 Basic Markdown edits
 
-Before applying a write, the UI shows:
-
-- Target path.
-- Operation type.
-- Diff for text changes.
-- Existing and proposed frontmatter.
-- Conflict warning when the file changed after the tool read it.
-- Approve once, approve for session, reject, and edit proposal actions.
-
-Delete, overwrite, rename, move, and binary modification always require explicit approval in the initial release.
+The model can create a new `.md` note, append Markdown, or replace one exact text fragment in an existing `.md` note without an approval prompt. Tool activity displays success or failure with the target path. Creating never overwrites an existing file; replacing fails if the old text is missing or ambiguous. Append and replace use `Vault.process()` to apply changes to the latest file content. Stop prevents later tool calls but cannot undo completed writes. Deletion, whole-note overwrite, rename, move, and binary modification are not exposed as model tools.
 
 ## 6. Architecture
 
 ```mermaid
 flowchart TD
-    UI[React UI] --> CHAT[useChat]
-    CHAT --> RUNTIME[Local Agent Runtime]
-    RUNTIME --> PROVIDER[ModelProvider Port]
-    RUNTIME --> TOOLS[Tool Registry]
-    RUNTIME --> PERM[Permission Service]
-    RUNTIME --> HISTORY[Conversation Store]
-
-    PROVIDER --> AZURE[Azure Foundry Model Adapter]
-    PROVIDER --> COMPAT[OpenAI-Compatible Adapter]
-
-    TOOLS --> VAULT[Vault Adapter]
-    TOOLS --> META[Metadata Adapter]
-    TOOLS --> EDITOR[Workspace/Editor Adapter]
-    TOOLS --> SEARCH[Local Search Service]
-    TOOLS --> WEB[Optional Web Search Adapter]
-
+    UI[Obsidian Chat ItemView] --> RUNTIME[LocalAgentRuntime]
+    SETTINGS[Obsidian PluginSettingTab] --> CONFIG[Provider connections and model profiles]
+    CONFIG --> RUNTIME
+    RUNTIME --> PROVIDER[ModelProvider interface]
+    RUNTIME --> VAULT[VaultService read and Markdown write tools]
+    PROVIDER --> AZURE[Azure Responses]
+    PROVIDER --> CLAUDE[Anthropic Messages]
+    PROVIDER --> GEMINI[Gemini generateContent]
+    PROVIDER --> CHAT[Chat Completions: DeepSeek, OpenAI, Grok, OpenRouter]
     VAULT --> OBSIDIAN[Public Obsidian APIs]
-    META --> OBSIDIAN
-    EDITOR --> OBSIDIAN
 ```
 
 ### 6.1 Architectural layers
 
 ```text
 src/
-  domain/
-    models/
-    ports/
-    tools/
+  main.ts                    plugin lifecycle, key lookup, provider selection
+  types.ts                   settings and shared request/tool contracts
+  settings.ts                one-provider-at-a-time settings UI
   providers/
-    azure-foundry/
-    openai-compatible/
-  obsidian/
-    vault.adapter.ts
-    metadata.adapter.ts
-    workspace.adapter.ts
-    secret-storage.adapter.ts
+    provider.ts              ModelProvider interface
+    azure-foundry.ts         Azure Responses API
+    anthropic.ts             Claude Messages API
+    gemini.ts                native Gemini generateContent API
+    chat-completions.ts      shared Chat Completions transport
+    deepseek.ts              DeepSeek-specific Chat configuration
   services/
-    local-agent-runtime.ts
-    context-builder.ts
-    embed-resolver.ts
-    image-service.ts
-    permission-service.ts
-    conversation-store.ts
-    semantic-search.ts
-    web-search.ts
-  hooks/
-    useChat.ts
-    useAgentRuntime.ts
-    useAttachments.ts
-    usePermissions.ts
-    useSettings.ts
+    agent-runtime.ts          provider-independent Vault tool loop
+    provider-settings.ts      connection defaults and legacy migration
+    vault-service.ts          Vault reads and Markdown writes
   ui/
-    ChatView.tsx
-    ChatPanel.tsx
-    MessageList.tsx
-    InputArea.tsx
-    ToolCallCard.tsx
-    PermissionDialog.tsx
-    SettingsTab.ts
-  plugin.ts
-  main.ts
+    chat-view.ts             Obsidian chat view and grouped model selector
 ```
 
 ### 6.2 Layer rules
 
-- `domain/**` has no dependency on Obsidian, React, Azure SDKs, or provider SDKs.
-- `providers/**` implements model-provider ports and never accesses the Vault directly.
-- `obsidian/**` isolates Obsidian API usage.
-- `services/**` contains provider-independent orchestration and pure transformations.
-- React hooks own UI state and compose services.
-- Components render state and do not contain provider or Vault business logic.
-- Tool schemas and tool implementations are separate.
+- `providers/**` implements the shared `ModelProvider` contract and never accesses Vault content directly.
+- `services/agent-runtime.ts` assembles context and executes only tools supported by the selected model and provider.
+- API keys stay in Obsidian `SecretStorage`; model profiles and endpoints are stored in plugin settings.
+- Provider conversation state is in memory. Cancelling a failed turn rolls back its unfinished history; switching models creates a new provider/runtime.
 
 ## 7. Core domain contracts
 
@@ -240,42 +201,22 @@ src/
 
 ```ts
 interface ModelProvider {
-  readonly id: string;
-
-  testConnection(signal?: AbortSignal): Promise<ConnectionTestResult>;
-
-  streamResponse(
-    request: ModelRequest,
-    handlers: ModelStreamHandlers,
-    signal?: AbortSignal,
-  ): Promise<ModelResponse>;
+  readonly supportsImages: boolean;
+  readonly supportsImageToolResults: boolean;
+  resetConversation(): void;
+  finishTurn(): void;
+  abortTurn(): void;
+  testConnection(): Promise<ConnectionTestResult>;
+  respond(
+    input: ProviderInput,
+    tools: ToolDefinition[],
+    handlers: ProviderHandlers,
+    signal: AbortSignal,
+  ): Promise<ProviderResult>;
 }
 ```
 
-The normalized request supports:
-
-- System instructions.
-- Conversation items.
-- Text input.
-- Image input.
-- Tool definitions.
-- Tool results.
-- Streaming.
-- Model/deployment selection.
-- Reasoning configuration when supported.
-- Maximum output limits.
-
-Provider-specific response events are converted to:
-
-```ts
-type AgentEvent =
-  | { type: "text_delta"; text: string }
-  | { type: "reasoning_delta"; text: string }
-  | { type: "tool_call"; call: ToolCall }
-  | { type: "usage"; usage: TokenUsage }
-  | { type: "completed"; responseId: string }
-  | { type: "error"; error: AgentError };
-```
+`ProviderInput` distinguishes a user message (text and optional images) from tool results. Each adapter translates tool definitions and streaming events to the shared handlers for text, tool calls, and usage. Azure retains response IDs; Chat Completions, Claude, and Gemini keep their own conversation histories in memory. DeepSeek reasoning content and Gemini thought signatures needed for tool continuation are never shown as ordinary chat text.
 
 ### 7.2 Vault access
 
@@ -332,23 +273,23 @@ interface WorkspaceAccess {
 
 The implementation must cover the following public `Vault` capabilities:
 
-| Capability          | Obsidian API               | Tool exposure                     |
-| ------------------- | -------------------------- | --------------------------------- |
-| Get file by path    | `getAbstractFileByPath()`  | Internal helper                   |
-| List all files      | `getFiles()`               | `list_files`                      |
-| List Markdown notes | `getMarkdownFiles()`       | `list_notes`                      |
-| Read text           | `cachedRead()` / `read()`  | `read_note`, `read_text_file`     |
-| Read binary         | `readBinary()`             | `read_binary_file`, image context |
-| Create text         | `create()`                 | `create_note`                     |
-| Create binary       | `createBinary()`           | Restricted internal operation     |
-| Modify text         | `modify()` / `process()`   | `edit_note`, `write_note`         |
-| Modify binary       | `modifyBinary()`           | Restricted future tool            |
-| Delete              | `trash()` / `delete()`     | `delete_file`                     |
-| Rename/move         | `FileManager.renameFile()` | `move_file`                       |
-| Copy                | `copy()`                   | `copy_file`                       |
-| File change events  | `vault.on(...)`            | Cache invalidation                |
+| Capability          | Obsidian API               | Tool exposure                      |
+| ------------------- | -------------------------- | ---------------------------------- |
+| Get file by path    | `getAbstractFileByPath()`  | Internal helper                    |
+| List all files      | `getFiles()`               | `list_files`                       |
+| List Markdown notes | `getMarkdownFiles()`       | `list_notes`                       |
+| Read text           | `cachedRead()` / `read()`  | `read_note`, `read_text_file`      |
+| Read binary         | `readBinary()`             | `read_binary_file`, image context  |
+| Create text         | `create()`                 | `create_note`                      |
+| Create binary       | `createBinary()`           | Restricted internal operation      |
+| Modify text         | `process()`                | `append_note`, `replace_note_text` |
+| Modify binary       | `modifyBinary()`           | Restricted future tool             |
+| Delete              | `trash()` / `delete()`     | `delete_file`                      |
+| Rename/move         | `FileManager.renameFile()` | `move_file`                        |
+| Copy                | `copy()`                   | `copy_file`                        |
+| File change events  | `vault.on(...)`            | Cache invalidation                 |
 
-`cachedRead()` is preferred for read-only context. `read()` or `process()` is used when a subsequent write requires the latest content.
+`cachedRead()` is preferred for read-only context. `process()` reads and changes the latest note content atomically for append and exact replacement.
 
 ### 8.2 MetadataCache
 
@@ -384,7 +325,7 @@ The plugin supports:
 - Current editor selection.
 - Cursor position.
 - Reading a selected range.
-- Replacing or inserting text after approval.
+- Replacing or inserting text in the active editor (future).
 - Opening a result file.
 - Following workspace file-open and active-leaf changes.
 
@@ -440,20 +381,15 @@ Assistant Markdown is rendered through Obsidian's Markdown renderer. The UI must
 | `semantic_search`      | Embedding-based semantic search                       |
 | `resolve_wikilink`     | Resolve a link relative to a source note              |
 
-### 9.2 Write tools
+### 9.2 Markdown write tools (implemented)
 
-| Tool                 | Purpose                    | Default permission     |
-| -------------------- | -------------------------- | ---------------------- |
-| `create_note`        | Create Markdown note       | Ask                    |
-| `edit_note`          | Apply a bounded text edit  | Ask with diff          |
-| `write_note`         | Replace full note          | Always ask             |
-| `update_frontmatter` | Update selected properties | Ask with property diff |
-| `append_to_note`     | Append Markdown            | Ask                    |
-| `move_file`          | Rename or move             | Always ask             |
-| `copy_file`          | Copy within Vault          | Ask                    |
-| `delete_file`        | Move to trash/delete       | Always ask             |
-| `insert_at_cursor`   | Insert into active editor  | Ask                    |
-| `replace_selection`  | Replace selected text      | Ask with diff          |
+| Tool                | Purpose                                      |
+| ------------------- | -------------------------------------------- |
+| `create_note`       | Create a new `.md` note and parent folders   |
+| `append_note`       | Append a non-empty block to an existing note |
+| `replace_note_text` | Replace exactly one occurrence of old text   |
+
+No whole-note replacement, approval prompt, delete, move, or binary-write tool is exposed.
 
 ### 9.3 Optional network tools
 
@@ -577,114 +513,51 @@ Requirements:
 
 The first version may use a remote Azure embedding deployment. A later version may add a browser-compatible local embedding model.
 
-## 12. Azure Foundry model integration
+## 12. Model provider integration
 
-### 12.1 Initial supported API
+### 12.1 Current provider configuration
 
-The initial Azure adapter targets the Azure OpenAI **Responses API**, exposed by an Azure Foundry model deployment.
+Each provider has one connection (endpoint and `apiKeySecretId`) and can have multiple model profiles. A profile stores its provider ID, display name, exact model/deployment ID, and optional image-input setting. `activeModelId` selects the model for chat; the Provider dropdown in settings only selects which connection is being edited.
 
-Configuration:
+| Provider           | Adapter                                      | Default base endpoint                              |
+| ------------------ | -------------------------------------------- | -------------------------------------------------- |
+| Azure Foundry      | Azure OpenAI Responses                       | User-configured Azure OpenAI v1 endpoint           |
+| DeepSeek           | Chat Completions with reasoning continuation | `https://api.deepseek.com`                         |
+| Claude (Anthropic) | Native Messages                              | `https://api.anthropic.com/v1`                     |
+| OpenAI             | Chat Completions                             | `https://api.openai.com/v1`                        |
+| Grok (xAI)         | Chat Completions                             | `https://api.x.ai/v1`                              |
+| Gemini (Google)    | Native generateContent                       | `https://generativelanguage.googleapis.com/v1beta` |
+| OpenRouter         | Chat Completions                             | `https://openrouter.ai/api/v1`                     |
 
-```ts
-interface AzureFoundrySettings {
-  endpoint: string;
-  deployments: Array<{
-    id: string;
-    displayName: string;
-    deploymentName: string;
-  }>;
-  activeDeploymentName: string;
-  authentication: "api-key" | "entra";
-  apiKeySecretId?: string;
-  tenantId?: string;
-  clientId?: string;
-  maxOutputTokens?: number;
-  reasoningEffort?: "minimal" | "low" | "medium" | "high";
-}
-```
+The Azure deployment name is sent as the Responses `model`. The other providers receive the exact configured model ID. Settings migrate old Azure endpoint/deployment profiles and preserve the saved key. A profile with no model ID is an editable draft and is omitted from the chat menu; selecting a model there changes both the active model and provider and resets the conversation.
 
-Endpoint example:
+### 12.2 Image and tool capabilities
 
-```text
-https://<resource-name>.openai.azure.com/openai/v1/
-```
+- Azure supports image input and structured `read_image` results when its deployment supports vision.
+- Claude exposes image input and `read_image` only when **Image input** is enabled for the model profile.
+- DeepSeek supports manual image input only for `deepseek-flash`. Neither DeepSeek nor OpenAI, Grok, OpenRouter, or Gemini receives `read_image`, because those adapters do not support the plugin's structured image tool result.
+- OpenAI, Grok, Gemini, and OpenRouter permit manual image input only when **Image input** is enabled for that profile. This is a user-configured capability, not automatic model detection.
+- The runtime rejects unsupported image input and refuses to execute a tool the selected provider did not offer, even if a model requests it.
 
-All deployments share the endpoint and authentication configuration. The active deployment name is sent as the `model` value. Switching deployments starts a new Responses conversation so a `previous_response_id` is never reused across deployments.
+All adapters support a minimal **Test** request, streamed text, tool calls, cancellation, and a nonstreaming fallback for an initial `fetch` transport failure. The test makes a real provider request and may incur usage charges; it does not auto-discover capabilities or switch the active model.
 
-### 12.2 Required Azure capabilities
-
-The adapter supports:
-
-- Text streaming.
-- Multi-turn conversation.
-- Function/tool calling.
-- Tool-result submission.
-- Image input for compatible deployments.
-- Usage reporting.
-- Cancellation.
-- Structured provider errors.
-- Stateful response IDs when enabled.
-
-The adapter must not assume every deployment supports every capability. Connection testing records:
-
-```ts
-interface ModelCapabilities {
-  text: boolean;
-  vision: boolean;
-  tools: boolean;
-  streaming: boolean;
-  reasoning: boolean;
-  fileInput: boolean;
-  maxInputTokens?: number;
-  maxOutputTokens?: number;
-}
-```
-
-Users may override incorrectly detected capabilities, but the UI must warn before sending unsupported content.
+See [README.md#configuration](README.md#configuration) for the setup and model-selection workflow.
 
 ### 12.3 Authentication
 
-#### API key
-
-- Suitable for initial development and single-user setups.
-- Stored in Obsidian `SecretStorage`.
-- Never synchronized with the Vault.
-- Never included in exported diagnostics.
-
-#### Microsoft Entra ID
-
-- Recommended for organizational deployments.
-- Mobile flow uses Authorization Code with PKCE through the system browser.
-- No client secret is embedded in the plugin.
-- Tokens are scoped to the required Foundry resource.
-- Refresh tokens or equivalent credential material use protected local storage.
-- Tenant restrictions and Conditional Access failures are surfaced directly.
-
-If secure token storage is unavailable on a platform, Entra login remains session-only rather than falling back to plaintext persistence.
+- API keys are stored per provider in Obsidian `SecretStorage`, not in plugin `data.json` or chat history. Deleting a saved key makes that provider unavailable to send requests. Legacy Azure keys are migrated without changing the selected model.
+- Azure uses the `api-key` header; Claude uses `x-api-key` and `anthropic-version`; Gemini uses `x-goog-api-key`; the Chat Completions adapters use bearer authorization.
+- Microsoft Entra ID with PKCE remains a future option, not part of the current plugin.
 
 ### 12.4 Provider abstraction
 
-Azure-specific types remain inside `providers/azure-foundry/`.
+`providers/azure-foundry.ts`, `providers/anthropic.ts`, `providers/gemini.ts`, and `providers/deepseek.ts` implement provider-specific behavior; `providers/chat-completions.ts` is shared by DeepSeek, OpenAI, Grok, and OpenRouter. `LocalAgentRuntime` owns context assembly and the Vault tool loop, not provider wire formats. Azure keeps `previous_response_id` in its provider instance; the other adapters retain only in-memory conversation history. Gemini keeps returned thought-signature parts intact across tool rounds, and DeepSeek retains required `reasoning_content`; neither is displayed in chat or saved to settings.
 
-The rest of the plugin works with normalized content:
-
-```ts
-type InputContent =
-  | { type: "text"; text: string }
-  | { type: "image"; mimeType: string; data: ArrayBuffer }
-  | { type: "file"; name: string; mimeType: string; data: ArrayBuffer };
-```
-
-This allows future adapters for:
-
-- OpenAI-compatible APIs.
-- Azure Foundry Prompt Agent.
-- Azure Foundry Hosted Agent.
-- Local browser-accessible Ollama/LM Studio endpoints where platform policies permit.
+Foundry agent services and local browser-accessible models remain possible future adapters, not current provider options.
 
 ### 12.5 Error handling
 
-The Azure adapter distinguishes:
+Adapters surface errors for:
 
 - Authentication failure.
 - Permission/RBAC failure.
@@ -709,13 +582,12 @@ No provider error is converted into a successful empty answer.
 2. Stream response
 3. Receive zero or more tool calls
 4. Validate tool names and arguments
-5. Request permission where required
-6. Execute tools through typed adapters
-7. Send normalized tool results back to the model
-8. Repeat until final response or limit
+5. Execute Vault tools (Markdown writes require no separate approval)
+6. Send normalized tool results back to the model
+7. Repeat until final response or limit
 ```
 
-Default limits:
+Proposed additional limits (not yet implemented):
 
 - Maximum 20 tool calls per user turn.
 - Maximum 8 sequential model/tool rounds.
@@ -731,34 +603,23 @@ Every tool has:
 - A stable name.
 - A JSON Schema input.
 - Runtime validation.
-- A permission category.
-- A timeout.
-- A maximum output size.
 - A user-facing description.
 
-Unknown properties are rejected. Paths are normalized and validated before any Vault operation.
+Schemas reject unknown properties; the runtime validates required arguments and Vault paths. Per-tool timeouts, output-size limits, and permission categories are future proposals, not current behavior.
 
 ### 13.3 Concurrency
 
 - Read-only tool calls may execute concurrently when they touch independent resources.
 - Writes are serialized.
-- A write checks the file mtime/content hash captured by the preceding read.
-- Conflicts stop the operation and request a new user decision.
+- Exact replacement checks for a unique match in the latest file content inside `Vault.process()`.
+- Missing or repeated text stops the operation without changing the note.
 - Streaming events update React state through functional updates.
 
 ## 14. Permissions and security
 
-### 14.1 Permission categories
+### 14.1 Tool access
 
-| Category             | Examples                       | Default                     |
-| -------------------- | ------------------------------ | --------------------------- |
-| Read current context | User-attached note/image       | Allow for current request   |
-| Read Vault           | Search or read another note    | Ask once per session        |
-| Write note           | Create/edit/append/frontmatter | Ask per call                |
-| Structural change    | Move/rename/copy               | Always ask                  |
-| Destructive          | Delete/overwrite/binary write  | Always ask                  |
-| Network              | Search/fetch URL               | Ask once per domain/session |
-| External upload      | Send note/image/file to model  | Explain during attachment   |
+Available Vault reads and basic Markdown writes run when requested by the model; no per-call approval is implemented. Writes are limited to new notes, append, and unique exact-text replacement. Structural and destructive actions are not exposed. Visible tool activity reports paths and failures; provider requests send context to the selected endpoint.
 
 ### 14.2 Path protection
 
@@ -783,7 +644,7 @@ They are wrapped with:
 - Size limits.
 - Output escaping where required.
 
-The model cannot grant itself permissions or change provider credentials.
+The model cannot bypass Vault path rules or change provider credentials.
 
 ### 14.4 Logging
 
@@ -831,14 +692,14 @@ On reload, missing files render as missing attachments rather than crashing.
 
 ### 16.1 Provider settings
 
-- Azure endpoint.
-- Deployment names and the active deployment.
-- Authentication method.
-- API key or Entra login.
-- Connection test.
-- Capability overrides.
-- Reasoning effort.
-- Output limit.
+The current settings page shows one provider at a time:
+
+1. The **Provider** dropdown navigates between Azure, DeepSeek, Claude, OpenAI, Grok, Gemini, and OpenRouter. It does not select the active chat provider; the dropdown marks the active provider with **(active)**.
+2. The selected provider exposes its endpoint and key saved in Obsidian `SecretStorage`, plus its model profiles. Each profile has a display name, exact model/deployment ID, and **Test**/**Use model** actions.
+3. Azure deployments use their exact deployment name. DeepSeek enables image input only for `deepseek-flash`; other non-Azure providers have a per-model **Image input** toggle for models known to support vision.
+4. **Use model** or the grouped chat menu updates `activeModelId` and starts a new conversation. Editing settings alone does not select a provider; profiles with no model ID do not appear in the chat menu.
+
+Profiles, endpoints, and `activeModelId` are stored in plugin settings; API key values are not. Entra login, model discovery, capability probes, and per-model reasoning/output settings are potential future work, not current controls.
 
 ### 16.2 Context settings
 
@@ -852,14 +713,11 @@ On reload, missing files render as missing attachments rather than crashing.
 
 Defaults must not automatically include the entire active note.
 
-### 16.3 Permission settings
+### 16.3 Additional safeguards (future)
 
-- Per-category approval policy.
-- Per-tool overrides.
-- Trusted read-only folders.
-- Always-protected folders.
-- Network-domain allowlist.
-- Reset all session permissions.
+- User-configurable protected folders.
+- Write history and recovery.
+- Network-domain allowlist for future web tools.
 
 ### 16.4 Search settings
 
@@ -934,7 +792,7 @@ Run the same contract suite against each provider adapter:
 - Report usage.
 - Surface authentication and rate-limit errors.
 
-Live Azure tests are opt-in and require secrets from the test environment.
+Live provider tests are opt-in and require user-provided keys. Mocked adapter tests do not establish live connectivity or mobile compatibility.
 
 ### 19.4 Platform tests
 
@@ -950,25 +808,23 @@ Mobile acceptance must occur before declaring a core feature complete.
 
 ## 20. Delivery phases
 
-### Phase 1: Direct chat and read-only Vault context
+### Phase 1: Direct chat and Vault tools (current implementation)
 
 - Plugin shell and chat UI.
-- Azure Foundry Responses adapter.
-- API-key authentication.
+- Azure Foundry, Claude, Gemini, DeepSeek, OpenAI, Grok, and OpenRouter adapters.
+- Per-provider API-key authentication and model profiles.
+- Provider dropdown for settings; provider-grouped model selection in chat.
 - Streaming text.
 - Attach current note and selection.
-- Mention and read notes.
+- Attach and read notes.
 - Read and attach Vault images.
 - Resolve embedded images.
-- Basic permission display.
+- Vault read tools and basic Markdown creation, append, and exact replacement.
 
-### Phase 2: Local tools and safe writes
+### Phase 2: Expanded capabilities (planned)
 
-- Tool loop.
-- List/read/search tools.
-- Create/edit/append/frontmatter tools.
-- Diff and approval UI.
-- Conflict detection.
+- Additional bounded Markdown edits and frontmatter tools.
+- Optional diff previews, write history, and recoverable backups.
 - Conversation persistence.
 - Export.
 
@@ -996,24 +852,26 @@ Mobile acceptance must occur before declaring a core feature complete.
 - Remote MCP.
 - Desktop-only local ACP adapter behind a separate capability flag.
 
-## 21. Initial acceptance criteria
+## 21. Provider and Markdown release acceptance criteria
 
-The first releasable version is complete when:
+The provider and basic Markdown feature set can be evaluated for release when:
 
 1. The same plugin package loads on desktop, iOS, and Android.
-2. A user can configure and test an Azure Foundry model deployment.
-3. The plugin streams an answer from the deployment.
+2. Users can configure and test model profiles for all seven provider choices without saving API key values in plugin settings.
+3. A configured model streams an answer and can request supported read-only Vault tools.
 4. A user can attach a Markdown note without exposing the whole vault.
 5. A user can attach an image stored in the Vault.
-6. A multimodal deployment receives correctly typed image input.
+6. A compatible model receives correctly typed image input when enabled for that provider/model.
 7. Embedded images can be included from an explicitly attached note.
-8. The model can request typed read-only Vault tools.
+8. The model can request typed read tools and create, append, or uniquely replace text in Markdown notes.
 9. All tool paths remain inside the Vault and protected paths are rejected.
-10. A proposed text edit is shown as a diff and is not applied without approval.
-11. Cancellation stops model streaming and prevents subsequent tool execution.
+10. Selecting another provider/model starts a new conversation and never reuses the previous provider's response state.
+11. Cancellation stops model streaming and prevents subsequent tool execution; completed writes are not undone.
 12. Authentication, quota, capability, and network errors are distinguishable.
 13. No credential or note content appears in normal logs.
-14. Automated tests cover path safety, image handling, tool validation, and Azure event normalization.
+14. Automated tests cover path safety, image handling, tool validation, and provider streaming/tool conversions. Real-provider and mobile checks are performed before claiming those environments are verified.
+
+See [ROADMAP.md](ROADMAP.md) for the basic write boundaries and remaining editing work.
 
 ## 22. Open decisions
 
@@ -1028,9 +886,6 @@ The first releasable version is complete when:
 
 > [!question] Web search
 > Should Web Search ship in the core plugin, or as an optional provider module?
-
-> [!question] Compatibility
-> Should the first release target only Azure Foundry, or expose the OpenAI-compatible provider from the beginning?
 
 ## 23. References
 

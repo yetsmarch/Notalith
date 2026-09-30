@@ -144,3 +144,68 @@ export const READ_ONLY_TOOLS: ToolDefinition[] = [
     strict: true,
   },
 ];
+
+export const MARKDOWN_WRITE_TOOLS: ToolDefinition[] = [
+  {
+    type: "function",
+    name: "create_note",
+    description:
+      "Create a new Markdown note in the vault. Never overwrite an existing file. Parent folders are created if needed.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Vault-relative .md path." },
+        content: {
+          type: "string",
+          description: "Initial Markdown content; may be empty.",
+        },
+      },
+      required: ["path", "content"],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
+  {
+    type: "function",
+    name: "append_note",
+    description:
+      "Append non-empty Markdown content to an existing .md note, separating it from existing content with a blank line. Never replace existing content.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Vault-relative .md path." },
+        content: {
+          type: "string",
+          description: "Non-empty Markdown content to append.",
+        },
+      },
+      required: ["path", "content"],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
+  {
+    type: "function",
+    name: "replace_note_text",
+    description:
+      "Replace an exact, non-empty text fragment in an existing .md note. The old text must occur exactly once in the latest note content; otherwise nothing changes. No whole-note replacement.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Vault-relative .md path." },
+        oldText: {
+          type: "string",
+          description:
+            "Exact original text, including whitespace and line breaks.",
+        },
+        newText: {
+          type: "string",
+          description: "Replacement text; may be empty to remove the fragment.",
+        },
+      },
+      required: ["path", "oldText", "newText"],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
+];

@@ -1,8 +1,15 @@
-import { App, MarkdownView, TFile, type CachedMetadata } from "obsidian";
+import {
+  App,
+  MarkdownView,
+  TFile,
+  TFolder,
+  type CachedMetadata,
+} from "obsidian";
 import type { ContextAttachment, ModelImage, NoteContext } from "../types";
 import {
   arrayBufferToBase64,
   imageMimeType,
+  validateMarkdownPath,
   validateVaultPath,
 } from "./path-utils";
 import {
@@ -20,7 +27,7 @@ export class VaultService {
 
   listNotes(folder = "", limit = 100): Array<{ path: string; name: string }> {
     const normalizedFolder = folder
-      ? `${validateVaultPath(folder).replace(/\/+$/, "")}/`
+      ? `${validateVaultPath(folder.replace(/[\\/]+$/, ""), this.app.vault.configDir)}/`
       : "";
 
     return this.app.vault
@@ -43,7 +50,7 @@ export class VaultService {
     size: number;
   }> {
     const normalizedFolder = folder
-      ? `${validateVaultPath(folder).replace(/\/+$/, "")}/`
+      ? `${validateVaultPath(folder.replace(/[\\/]+$/, ""), this.app.vault.configDir)}/`
       : "";
 
     return this.app.vault
@@ -115,6 +122,77 @@ export class VaultService {
       images: [],
       truncated: fullContent.length > maxCharacters,
     };
+  }
+
+  async createMarkdownNote(
+    path: string,
+    content: string,
+    signal: AbortSignal,
+  ): Promise<string> {
+    const normalized = validateMarkdownPath(path, this.app.vault.configDir);
+    if (this.app.vault.getAbstractFileByPath(normalized)) {
+      throw new Error(`Note already exists: ${normalized}`);
+    }
+    const folders = normalized.split("/").slice(0, -1);
+    for (let index = 0; index < folders.length; index++) {
+      this.requireNotCancelled(signal);
+      const folderPath = folders.slice(0, index + 1).join("/");
+      const existing = this.app.vault.getAbstractFileByPath(folderPath);
+      if (existing && !(existing instanceof TFolder)) {
+        throw new Error(`Not a folder: ${folderPath}`);
+      }
+      if (!existing) await this.app.vault.createFolder(folderPath);
+    }
+    this.requireNotCancelled(signal);
+    const file = await this.app.vault.create(normalized, content);
+    return file.path;
+  }
+
+  async appendMarkdownNote(
+    path: string,
+    addition: string,
+    signal: AbortSignal,
+  ): Promise<string> {
+    if (!addition) throw new Error("Append content must not be empty.");
+    const file = this.requireMarkdownFile(path);
+    await this.app.vault.process(file, (current) => {
+      this.requireNotCancelled(signal);
+      if (!current) return addition;
+      const newline = current.includes("\r\n") ? "\r\n" : "\n";
+      const separator = current.endsWith(newline + newline)
+        ? ""
+        : current.endsWith(newline)
+          ? newline
+          : newline + newline;
+      return current + separator + addition;
+    });
+    return file.path;
+  }
+
+  async replaceMarkdownText(
+    path: string,
+    oldText: string,
+    newText: string,
+    signal: AbortSignal,
+  ): Promise<string> {
+    if (!oldText) throw new Error("Text to replace must not be empty.");
+    if (oldText === newText)
+      throw new Error("Replacement must change the note.");
+    const file = this.requireMarkdownFile(path);
+    await this.app.vault.process(file, (current) => {
+      this.requireNotCancelled(signal);
+      const first = current.indexOf(oldText);
+      if (first === -1) throw new Error(`Text not found in note: ${file.path}`);
+      if (current.indexOf(oldText, first + 1) !== -1) {
+        throw new Error(`Text occurs more than once in note: ${file.path}`);
+      }
+      return (
+        current.slice(0, first) +
+        newText +
+        current.slice(first + oldText.length)
+      );
+    });
+    return file.path;
   }
 
   async readImage(path: string): Promise<ModelImage> {
@@ -226,10 +304,23 @@ export class VaultService {
   }
 
   private requireFile(path: string): TFile {
-    const normalized = validateVaultPath(path);
+    const normalized = validateVaultPath(path, this.app.vault.configDir);
     const file = this.app.vault.getAbstractFileByPath(normalized);
     if (!(file instanceof TFile)) throw new Error(`File not found: ${path}`);
     return file;
+  }
+
+  private requireMarkdownFile(path: string): TFile {
+    const normalized = validateMarkdownPath(path, this.app.vault.configDir);
+    const file = this.app.vault.getAbstractFileByPath(normalized);
+    if (!(file instanceof TFile)) {
+      throw new Error(`Markdown note not found: ${normalized}`);
+    }
+    return file;
+  }
+
+  private requireNotCancelled(signal: AbortSignal): void {
+    if (signal.aborted) throw new Error("Request cancelled.");
   }
 
   private serializeMetadata(

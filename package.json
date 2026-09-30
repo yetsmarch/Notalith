@@ -1,26 +1,29 @@
 {
   "name": "notalith",
   "version": "0.1.0",
-  "description": "A platform-neutral Obsidian assistant powered by Azure Foundry models",
+  "description": "A platform-neutral Obsidian assistant with Azure, Claude, Gemini, DeepSeek, OpenAI, Grok and OpenRouter providers",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "tsc --noEmit -skipLibCheck && node esbuild.config.mjs production",
     "test": "vitest run",
+    "lint": "eslint \"src/**/*.ts\" package.json",
     "format": "prettier --write \"src/**/*.ts\" \"*.{json,md,css,mjs}\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"*.{json,md,css,mjs}\""
   },
   "license": "Apache-2.0",
   "dependencies": {
-    "fflate": "0.8.2"
+    "fflate": "0.8.3"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "esbuild": "^0.25.0",
+    "eslint": "^9.39.5",
+    "eslint-plugin-obsidianmd": "^0.4.2",
     "obsidian": "1.11.4",
     "prettier": "^3.4.2",
     "tslib": "^2.8.1",
     "typescript": "^5.9.3",
-    "vitest": "3.2.4"
+    "vitest": "4.1.11"
   }
 }

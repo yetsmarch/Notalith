@@ -1,17 +1,32 @@
-export function validateVaultPath(path: string): string {
-  const normalized = path.replaceAll("\\", "/").replace(/^\/+/, "");
+export function validateVaultPath(path: string, configDir: string): string {
+  const normalized = path.replaceAll("\\", "/");
   const segments = normalized.split("/");
+  const protectedDir = configDir.replaceAll("\\", "/").replace(/\/+$/, "");
+  const lowerPath = normalized.toLowerCase();
+  const lowerDir = protectedDir.toLowerCase();
 
   if (
     !normalized ||
     normalized.includes("\0") ||
-    segments.some((segment) => segment === "..") ||
-    normalized === ".obsidian" ||
-    normalized.startsWith(".obsidian/")
+    normalized.startsWith("/") ||
+    /^[^/]*:/.test(normalized) ||
+    segments.some(
+      (segment) => !segment || segment === "." || segment === "..",
+    ) ||
+    lowerPath === lowerDir ||
+    lowerPath.startsWith(`${lowerDir}/`)
   ) {
     throw new Error(`Unsafe vault path: ${path}`);
   }
 
+  return normalized;
+}
+
+export function validateMarkdownPath(path: string, configDir: string): string {
+  const normalized = validateVaultPath(path, configDir);
+  if (!normalized.endsWith(".md")) {
+    throw new Error(`Not a Markdown note path: ${path}`);
+  }
   return normalized;
 }
 

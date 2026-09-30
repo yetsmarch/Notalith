@@ -2,14 +2,17 @@ import { requestUrl } from "obsidian";
 import type {
   ConnectionTestResult,
   ModelTurnInput,
-  NotalithSettings,
+  ModelProfile,
+  ProviderConnection,
   ProviderHandlers,
+  ProviderInput,
   ProviderResult,
   ProviderUsage,
   ToolCall,
   ToolDefinition,
 } from "../types";
 import { NotalithError } from "../types";
+import type { ModelProvider } from "./provider";
 
 type ResponseInput = Array<Record<string, unknown>> | string;
 
@@ -38,16 +41,42 @@ interface ResponseObject {
   };
 }
 
-export class AzureFoundryProvider {
+interface AzureResponseResult extends ProviderResult {
+  responseId: string;
+}
+
+export class AzureFoundryProvider implements ModelProvider {
+  readonly supportsImages = true;
+  readonly supportsImageToolResults = true;
+  private previousResponseId: string | undefined;
+  private turnStartResponseId: string | undefined;
+  private turnInProgress = false;
+
   constructor(
-    private readonly settings: NotalithSettings,
+    private readonly connection: ProviderConnection,
+    private readonly model: ModelProfile,
+    private readonly systemPrompt: string,
     private readonly getApiKey: () => string | null,
   ) {}
+
+  resetConversation(): void {
+    this.previousResponseId = undefined;
+    this.turnInProgress = false;
+  }
+
+  finishTurn(): void {
+    this.turnInProgress = false;
+  }
+
+  abortTurn(): void {
+    if (this.turnInProgress) this.previousResponseId = this.turnStartResponseId;
+    this.turnInProgress = false;
+  }
 
   async testConnection(): Promise<ConnectionTestResult> {
     this.validateConfiguration();
     const request: ResponseRequest = {
-      model: this.settings.deploymentName,
+      model: this.model.modelId,
       input: "Reply with OK.",
       stream: false,
     };
@@ -69,7 +98,7 @@ export class AzureFoundryProvider {
       const parsed = response.json as ResponseObject;
       return {
         ok: true,
-        message: `Connected to deployment "${this.settings.deploymentName}" (${parsed.id ?? "response received"}).`,
+        message: `Connected to deployment "${this.model.modelId}" (${parsed.id ?? "response received"}).`,
       };
     } catch (error) {
       const normalized = this.normalizeError(error);
@@ -78,48 +107,67 @@ export class AzureFoundryProvider {
   }
 
   async respond(
-    input: ModelTurnInput | Array<Record<string, unknown>>,
+    input: ProviderInput,
     tools: ToolDefinition[],
     handlers: ProviderHandlers,
     signal: AbortSignal,
-    previousResponseId?: string,
   ): Promise<ProviderResult> {
     this.validateConfiguration();
     if (signal.aborted) throw this.cancelledError();
+    if (input.kind === "message") {
+      this.turnStartResponseId = this.previousResponseId;
+      this.turnInProgress = true;
+    }
 
     const request: ResponseRequest = {
-      model: this.settings.deploymentName,
-      instructions: previousResponseId ? undefined : this.settings.systemPrompt,
-      input: Array.isArray(input) ? input : this.toUserInput(input),
+      model: this.model.modelId,
+      instructions: this.previousResponseId ? undefined : this.systemPrompt,
+      input:
+        input.kind === "message"
+          ? this.toUserInput(input.message)
+          : input.results.map((result) => ({
+              type: "function_call_output",
+              call_id: result.callId,
+              output: result.output,
+            })),
       stream: true,
-      previous_response_id: previousResponseId,
+      previous_response_id: this.previousResponseId,
       tools,
       tool_choice: "auto",
     };
 
+    let result: AzureResponseResult;
+    let streamingStarted = false;
     try {
-      return await this.streamResponse(request, handlers, signal);
+      result = await this.streamResponse(request, handlers, signal, () => {
+        streamingStarted = true;
+      });
     } catch (error) {
       if (signal.aborted) throw this.cancelledError();
 
       // Obsidian's requestUrl works without CORS but is not streaming. Fall
       // back only for network-level fetch failures, not provider HTTP errors.
-      if (error instanceof TypeError) {
-        return await this.completeResponse(
+      if (error instanceof TypeError && !streamingStarted) {
+        result = await this.completeResponse(
           { ...request, stream: false },
           handlers,
           signal,
         );
+      } else {
+        throw this.normalizeError(error);
       }
-      throw this.normalizeError(error);
     }
+    if (signal.aborted) throw this.cancelledError();
+    this.previousResponseId = result.responseId;
+    return { toolCalls: result.toolCalls, usage: result.usage };
   }
 
   private async streamResponse(
     request: ResponseRequest,
     handlers: ProviderHandlers,
     signal: AbortSignal,
-  ): Promise<ProviderResult> {
+    onStreamStart: () => void,
+  ): Promise<AzureResponseResult> {
     const response = await fetch(this.responsesUrl(), {
       method: "POST",
       headers: this.headers(),
@@ -133,13 +181,64 @@ export class AzureFoundryProvider {
     if (!response.body) {
       throw new TypeError("Streaming response body is unavailable.");
     }
+    onStreamStart();
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
     let responseId = "";
+    let completed = false;
     let usage: ProviderUsage | undefined;
     const toolCalls: ToolCall[] = [];
+
+    const consume = (block: string): void => {
+      for (const payload of this.ssePayloads(block)) {
+        if (payload === "[DONE]") continue;
+        const event = JSON.parse(payload) as Record<string, unknown>;
+        const eventType = typeof event.type === "string" ? event.type : "";
+
+        if (eventType === "response.output_text.delta") {
+          if (typeof event.delta === "string") {
+            handlers.onTextDelta(event.delta);
+          }
+        } else if (eventType === "response.output_item.done") {
+          const call = this.parseToolCall(event.item);
+          if (call) {
+            toolCalls.push(call);
+            handlers.onToolCall(call);
+          }
+        } else if (
+          eventType === "response.created" ||
+          eventType === "response.completed"
+        ) {
+          if (eventType === "response.completed") completed = true;
+          const parsedResponse = this.asRecord(event.response);
+          if (typeof parsedResponse?.id === "string") {
+            responseId = parsedResponse.id;
+          }
+          const parsedUsage = this.parseUsage(parsedResponse?.usage);
+          if (parsedUsage) {
+            usage = parsedUsage;
+            handlers.onUsage(parsedUsage);
+          }
+        } else if (
+          eventType === "response.failed" ||
+          eventType === "response.incomplete" ||
+          eventType === "error"
+        ) {
+          const message =
+            this.asRecord(event.error)?.message ??
+            event.message ??
+            "Azure Foundry streaming error.";
+          throw new NotalithError(
+            typeof message === "string"
+              ? message
+              : "Azure Foundry streaming error.",
+            "provider",
+          );
+        }
+      }
+    };
 
     while (true) {
       const { done, value } = await reader.read();
@@ -148,49 +247,14 @@ export class AzureFoundryProvider {
 
       const blocks = buffer.split(/\r?\n\r?\n/);
       buffer = blocks.pop() ?? "";
-      for (const block of blocks) {
-        for (const payload of this.ssePayloads(block)) {
-          if (payload === "[DONE]") continue;
-          const event = JSON.parse(payload) as Record<string, unknown>;
-          const eventType = typeof event.type === "string" ? event.type : "";
-
-          if (eventType === "response.output_text.delta") {
-            if (typeof event.delta === "string") {
-              handlers.onTextDelta(event.delta);
-            }
-          } else if (eventType === "response.output_item.done") {
-            const call = this.parseToolCall(event.item);
-            if (call) {
-              toolCalls.push(call);
-              handlers.onToolCall(call);
-            }
-          } else if (
-            eventType === "response.created" ||
-            eventType === "response.completed"
-          ) {
-            const parsedResponse = this.asRecord(event.response);
-            if (typeof parsedResponse?.id === "string") {
-              responseId = parsedResponse.id;
-            }
-            const parsedUsage = this.parseUsage(parsedResponse?.usage);
-            if (parsedUsage) {
-              usage = parsedUsage;
-              handlers.onUsage(parsedUsage);
-            }
-          } else if (eventType === "error") {
-            const message =
-              this.asRecord(event.error)?.message ??
-              event.message ??
-              "Azure Foundry streaming error.";
-            throw new NotalithError(String(message), "provider");
-          }
-        }
-      }
+      for (const block of blocks) consume(block);
     }
+    buffer += decoder.decode();
+    if (buffer.trim()) consume(buffer);
 
-    if (!responseId) {
+    if (!responseId || !completed) {
       throw new NotalithError(
-        "Azure Foundry did not return a response ID.",
+        "Azure Foundry response did not complete normally.",
         "provider",
       );
     }
@@ -202,7 +266,7 @@ export class AzureFoundryProvider {
     request: ResponseRequest,
     handlers: ProviderHandlers,
     signal: AbortSignal,
-  ): Promise<ProviderResult> {
+  ): Promise<AzureResponseResult> {
     if (signal.aborted) throw this.cancelledError();
     const response = await requestUrl({
       url: this.responsesUrl(),
@@ -331,7 +395,7 @@ export class AzureFoundryProvider {
   }
 
   private validateConfiguration(): void {
-    if (!this.settings.azureEndpoint || !this.settings.deploymentName) {
+    if (!this.connection.endpoint || !this.model.modelId) {
       throw new NotalithError(
         "Configure the Azure endpoint and deployment name in Notalith settings.",
         "configuration",
@@ -346,7 +410,7 @@ export class AzureFoundryProvider {
   }
 
   private responsesUrl(): string {
-    return `${this.settings.azureEndpoint.replace(/\/+$/, "")}/responses`;
+    return `${this.connection.endpoint.replace(/\/+$/, "")}/responses`;
   }
 
   private headers(): Record<string, string> {
