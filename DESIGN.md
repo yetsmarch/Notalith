@@ -39,7 +39,7 @@ Local agent runtime inside the plugin
 ```
 
 > [!note] Current implementation and future design
-> The current code uses an Obsidian `ItemView`, `LocalAgentRuntime`, read tools, and three basic Markdown write tools. Sections describing React, additional write operations, semantic search, conversation persistence, or additional limits below are proposals, not implemented features. [ROADMAP.md](ROADMAP.md) tracks the editing scope and remaining work.
+> The current code uses an Obsidian `ItemView`, `LocalAgentRuntime`, read tools, local knowledge/filtered-regex search, device-file imports, and basic Markdown/folder write tools. Sections describing React, additional write operations, semantic search, conversation persistence, or additional limits below are proposals, not implemented features. [ROADMAP.md](ROADMAP.md) tracks the editing scope and remaining work.
 
 The plugin must not require Node.js, a local CLI, `child_process`, Electron APIs, or an ACP process for its core feature set. This allows the same architecture to run in Obsidian Desktop, iOS, and Android.
 
@@ -362,7 +362,7 @@ Assistant Markdown is rendered through Obsidian's Markdown renderer. The UI must
 
 ## 9. Local tool catalog
 
-### 9.1 Read-only tools
+### 9.1 Read-only tools (implemented)
 
 | Tool                   | Purpose                                               |
 | ---------------------- | ----------------------------------------------------- |
@@ -377,17 +377,44 @@ Assistant Markdown is rendered through Obsidian's Markdown renderer. The UI must
 | `get_backlinks`        | Return notes linking to a target                      |
 | `get_outgoing_links`   | Return links from a note                              |
 | `get_unresolved_links` | Return unresolved links                               |
-| `search_vault`         | Full-text/path/tag search                             |
-| `semantic_search`      | Embedding-based semantic search                       |
+| `search_vault`         | Original keyword content/path search                  |
+| `search_notes`         | Filtered full-content/path search with safe RE2 regex |
+| `list_tags`            | Inline/frontmatter tag index and distinct-note counts |
+| `get_note_outline`     | Heading levels and one-based line numbers             |
+| `get_attachment_link`  | Obsidian-generated Markdown links/embeds              |
 | `resolve_wikilink`     | Resolve a link relative to a source note              |
+
+Knowledge queries use the public `MetadataCache.resolvedLinks`,
+`unresolvedLinks`, `getFileCache`, and `getAllTags` APIs, not embeddings. Graph
+results follow Obsidian indexing; tag/search results expose `uncachedNoteCount`
+and unindexed outlines fail explicitly. All new collection tools are paginated.
+`semantic_search` is a future feature and is not registered.
+
+Device-file import is a UI action, not a model binary-write tool. A browser
+multiple-file picker reads each file into an ArrayBuffer (25 MB maximum);
+`Vault.createBinary` stores it without overwriting. The destination defaults to
+`FileManager.getAvailablePathForAttachment`, or the configured
+`attachmentFolder` with unique suffixes and missing-parent creation. Public
+`FileManager.generateMarkdownLink` creates reusable links without editing notes.
+Readable Markdown, text, image and Office files become chat attachments;
+unsupported files are explicitly reference-only. Imports do not download URLs.
 
 ### 9.2 Markdown write tools (implemented)
 
-| Tool                | Purpose                                      |
-| ------------------- | -------------------------------------------- |
-| `create_note`       | Create a new `.md` note and parent folders   |
-| `append_note`       | Append a non-empty block to an existing note |
-| `replace_note_text` | Replace exactly one occurrence of old text   |
+P0 directory and context tools are also implemented: `list_directory`,
+`get_directory_tree`, `read_note_range`, `read_text_file`, `get_active_note`,
+`get_editor_selection`, `get_cursor_position`, and `resolve_wikilink`.
+Directory results are paginated flat paths with entry kinds; text ranges use
+one-based inclusive lines and character continuation offsets. Link resolution
+uses Obsidian's `parseLinktext`, `getFirstLinkpathDest`, and `resolveSubpath`,
+with an explicit alias fallback. Editor coordinates use zero-based line/ch.
+
+| Tool                | Purpose                                          |
+| ------------------- | ------------------------------------------------ |
+| `create_note`       | Create a new `.md` note and parent folders       |
+| `append_note`       | Append a non-empty block to an existing note     |
+| `replace_note_text` | Replace exactly one occurrence of old text       |
+| `create_folder`     | Create an empty Vault folder and missing parents |
 
 No whole-note replacement, approval prompt, delete, move, or binary-write tool is exposed.
 
@@ -486,18 +513,23 @@ Initial behavior:
 
 ## 11. Local search
 
-### 11.1 Lexical search
+### 11.1 Lexical search (implemented)
 
-Lexical search covers:
+`search_notes` scans complete Markdown contents and paths on demand, with no
+persisted plugin index. Obsidian metadata supplies inline/frontmatter tags and
+typed property conditions (including nested keys). Filesystem creation and
+modification times, recursive folder boundaries, and tag/property filters are
+AND-combined. Null/empty queries support metadata-only discovery.
 
-- Path and filename.
-- Note content.
-- Tags and aliases.
-- Frontmatter values.
+Matches are path-sorted with excerpts, one-based first content-match lines and
+pagination. Bounds are inclusive UTC calendar dates or timezone-qualified ISO
+timestamps. Cancellation is checked between reads, with periodic event-loop
+yields. Regex uses browser-compatible RE2JS, multiline matching, optional case
+sensitivity and a 1,000-character pattern limit. Backreferences/lookarounds and
+invalid expressions return explicit errors rather than using native backtracking.
+The original `search_vault` retains its keyword-only behavior.
 
-Index updates follow Vault change, rename, and delete events.
-
-### 11.2 Semantic search
+### 11.2 Semantic search (future, not implemented)
 
 Semantic search is optional and provider-independent.
 

@@ -101,6 +101,10 @@ export default class NotalithPlugin extends Plugin {
         typeof settings.maxToolRounds === "number"
           ? settings.maxToolRounds
           : DEFAULT_SETTINGS.maxToolRounds,
+      attachmentFolder:
+        typeof settings.attachmentFolder === "string"
+          ? settings.attachmentFolder
+          : DEFAULT_SETTINGS.attachmentFolder,
       ...normalizeProviderSettings(stored),
     };
     if (this.settings.systemPrompt === LEGACY_SYSTEM_PROMPT) {

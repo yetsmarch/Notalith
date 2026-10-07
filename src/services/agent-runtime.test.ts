@@ -13,9 +13,109 @@ const settings: NotalithSettings = {
   includeEmbeddedImages: false,
   maxNoteCharacters: 1000,
   maxToolRounds: 2,
+  attachmentFolder: "",
 };
 
 describe("local agent runtime", () => {
+  it("advertises and dispatches every P0 tool with pagination and range arguments", async () => {
+    const listEntries = vi.fn(() => ({ items: [], nextOffset: null }));
+    const readTextFile = vi.fn(async () => ({
+      content: "text",
+      nextOffset: null,
+    }));
+    const getActiveNote = vi.fn(() => ({ path: "Note.md" }));
+    const getEditorContext = vi.fn(() => ({
+      path: "Note.md",
+      cursor: { line: 1, ch: 2 },
+      positionBase: 0,
+    }));
+    const resolveWikilink = vi.fn(async () => ({
+      path: "Note.md",
+      startLine: 2,
+      endLine: 4,
+    }));
+    const createFolder = vi.fn(async () => "Empty");
+    const cases = [
+      [
+        "list_directory",
+        { folder: null, kind: "folder", offset: 2, limit: 10 },
+      ],
+      [
+        "get_directory_tree",
+        { folder: "Notes", kind: null, offset: null, limit: null },
+      ],
+      [
+        "read_note_range",
+        { path: "Note.md", startLine: 2, endLine: 4, offset: 5 },
+      ],
+      [
+        "read_text_file",
+        { path: "data.csv", startLine: null, endLine: null, offset: null },
+      ],
+      ["get_active_note", {}],
+      ["get_editor_selection", {}],
+      ["get_cursor_position", {}],
+      ["resolve_wikilink", { link: "[[Alias#Title]]", sourcePath: "Note.md" }],
+      ["create_folder", { path: "Empty" }],
+    ] as const;
+    const provider: ModelProvider = {
+      supportsImages: false,
+      supportsImageToolResults: false,
+      resetConversation: vi.fn(),
+      finishTurn: vi.fn(),
+      abortTurn: vi.fn(),
+      testConnection: vi.fn(),
+      respond: vi.fn<ModelProvider["respond"]>(
+        async (input, tools, handlers) => {
+          if (input.kind === "message") {
+            for (const [name, args] of cases) {
+              expect(tools.some((tool) => tool.name === name)).toBe(true);
+              handlers.onToolCall({
+                callId: name,
+                name,
+                arguments: JSON.stringify(args),
+              });
+            }
+          } else {
+            expect(input.results).toHaveLength(cases.length);
+            for (const result of input.results)
+              expect(result.output).not.toContain('"error"');
+          }
+          return { toolCalls: [] };
+        },
+      ),
+    };
+    const vault = {
+      listEntries,
+      readTextFile,
+      getActiveNote,
+      getEditorContext,
+      resolveWikilink,
+      createFolder,
+    } as unknown as VaultService;
+    const signal = new AbortController().signal;
+    await new LocalAgentRuntime(settings, vault, provider).send(
+      "Use P0 tools",
+      [],
+      { onTextDelta: vi.fn(), onToolActivity: vi.fn(), onUsage: vi.fn() },
+      signal,
+    );
+    expect(listEntries).toHaveBeenCalledWith("", false, "folder", 2, 10);
+    expect(listEntries).toHaveBeenCalledWith("Notes", true, "all", 0, 100);
+    expect(readTextFile).toHaveBeenCalledWith("Note.md", 1000, 2, 4, 5, true);
+    expect(readTextFile).toHaveBeenCalledWith(
+      "data.csv",
+      1000,
+      1,
+      null,
+      0,
+      false,
+    );
+    expect(resolveWikilink).toHaveBeenCalledWith("[[Alias#Title]]", "Note.md");
+    expect(createFolder).toHaveBeenCalledWith("Empty", signal);
+    expect(getEditorContext).toHaveBeenCalledTimes(2);
+  });
+
   it("advertises all Markdown writes and executes them with exact text arguments", async () => {
     const createMarkdownNote = vi.fn(async () => "New.md");
     const appendMarkdownNote = vi.fn(async () => "New.md");
@@ -253,4 +353,208 @@ describe("local agent runtime", () => {
       expect(abortTurn).toHaveBeenCalledOnce();
     },
   );
+});
+
+describe("local knowledge and advanced search runtime wiring", () => {
+  it("advertises and dispatches every new local tool with strict arguments", async () => {
+    const vault = {
+      getBacklinks: vi.fn(() => ({ items: [], nextOffset: null })),
+      getOutgoingLinks: vi.fn(() => ({ items: [], nextOffset: null })),
+      getUnresolvedLinks: vi.fn(() => ({ items: [], nextOffset: null })),
+      getTagIndex: vi.fn(() => ({ items: [], nextOffset: null })),
+      getNoteOutline: vi.fn(() => ({ items: [], nextOffset: null })),
+      generateAttachmentLink: vi.fn(() => ({ link: "[[file.pdf]]" })),
+      searchNotesAdvanced: vi.fn(async () => ({ items: [], nextOffset: null })),
+    };
+    const search = {
+      query: "^item",
+      regex: true,
+      caseSensitive: false,
+      folder: "Notes",
+      tags: ["work"],
+      properties: [{ key: "status", operator: "equals", value: "ready" }],
+      createdAfter: "2026-01-01",
+      createdBefore: null,
+      modifiedAfter: null,
+      modifiedBefore: null,
+      offset: 2,
+      limit: 5,
+    };
+    const cases = [
+      ["get_backlinks", { path: "a.md", offset: 2, limit: 5 }],
+      ["get_outgoing_links", { path: "a.md", offset: null, limit: null }],
+      ["get_unresolved_links", { path: null, offset: null, limit: null }],
+      ["list_tags", { prefix: "work", offset: 2, limit: 5 }],
+      ["get_note_outline", { path: "a.md", offset: 2, limit: 5 }],
+      [
+        "get_attachment_link",
+        { path: "file.pdf", sourcePath: "a.md", embed: true },
+      ],
+      ["search_notes", search],
+    ] as const;
+    const provider: ModelProvider = {
+      supportsImages: false,
+      supportsImageToolResults: false,
+      resetConversation: vi.fn(),
+      finishTurn: vi.fn(),
+      abortTurn: vi.fn(),
+      testConnection: vi.fn(),
+      respond: vi.fn<ModelProvider["respond"]>(
+        async (input, tools, handlers) => {
+          if (input.kind === "message") {
+            for (const [name, args] of cases) {
+              expect(tools.some((tool) => tool.name === name)).toBe(true);
+              handlers.onToolCall({
+                name,
+                callId: name,
+                arguments: JSON.stringify(args),
+              });
+            }
+          } else {
+            expect(input.results).toHaveLength(cases.length);
+            expect(
+              input.results.every(
+                (result) =>
+                  typeof result.output === "string" &&
+                  !result.output.includes('"error"'),
+              ),
+            ).toBe(true);
+          }
+          return { toolCalls: [] };
+        },
+      ),
+    };
+    const signal = new AbortController().signal;
+    await new LocalAgentRuntime(
+      settings,
+      vault as unknown as VaultService,
+      provider,
+    ).send(
+      "test",
+      [],
+      { onTextDelta: vi.fn(), onToolActivity: vi.fn(), onUsage: vi.fn() },
+      signal,
+    );
+    expect(vault.getBacklinks).toHaveBeenCalledWith("a.md", 2, 5);
+    expect(vault.getOutgoingLinks).toHaveBeenCalledWith("a.md", 0, 100);
+    expect(vault.getUnresolvedLinks).toHaveBeenCalledWith(null, 0, 100);
+    expect(vault.getTagIndex).toHaveBeenCalledWith("work", 2, 5);
+    expect(vault.getNoteOutline).toHaveBeenCalledWith("a.md", 2, 5);
+    expect(vault.generateAttachmentLink).toHaveBeenCalledWith(
+      "file.pdf",
+      "a.md",
+      true,
+    );
+    expect(vault.searchNotesAdvanced).toHaveBeenCalledWith(search, signal);
+  });
+
+  it("surfaces invalid search filters as tool errors instead of silently defaulting", async () => {
+    const invalid = [
+      { regex: "true" },
+      { query: 12 },
+      { tags: [""] },
+      { tags: "work" },
+      { properties: [{ key: "status", operator: "unknown", value: "x" }] },
+      {
+        properties: [
+          { key: "__proto__.hidden", operator: "exists", value: null },
+        ],
+      },
+      { properties: [{ key: "count", operator: "gt", value: "4" }] },
+      { limit: 201 },
+      { offset: -1 },
+      { createdAfter: 2026 },
+    ];
+    const searchNotesAdvanced = vi.fn();
+    const activity = vi.fn<RuntimeHandlers["onToolActivity"]>();
+    const provider: ModelProvider = {
+      supportsImages: false,
+      supportsImageToolResults: false,
+      resetConversation: vi.fn(),
+      finishTurn: vi.fn(),
+      abortTurn: vi.fn(),
+      testConnection: vi.fn(),
+      respond: vi.fn<ModelProvider["respond"]>(
+        async (input, _tools, handlers) => {
+          if (input.kind === "message")
+            invalid.forEach((args, i) =>
+              handlers.onToolCall({
+                name: "search_notes",
+                callId: String(i),
+                arguments: JSON.stringify(args),
+              }),
+            );
+          else
+            expect(
+              input.results.every(
+                (result) =>
+                  typeof result.output === "string" &&
+                  result.output.includes('"error"'),
+              ),
+            ).toBe(true);
+          return { toolCalls: [] };
+        },
+      ),
+    };
+    await new LocalAgentRuntime(
+      settings,
+      { searchNotesAdvanced } as unknown as VaultService,
+      provider,
+    ).send(
+      "test",
+      [],
+      { onTextDelta: vi.fn(), onToolActivity: activity, onUsage: vi.fn() },
+      new AbortController().signal,
+    );
+    expect(searchNotesAdvanced).not.toHaveBeenCalled();
+    expect(
+      activity.mock.calls.filter(([item]) => item.status === "error"),
+    ).toHaveLength(invalid.length);
+  });
+
+  it("sends extracted text but only a reference for unsupported imported files", async () => {
+    const readTextFile = vi.fn(async () => ({
+      content: "A,B\n1,2",
+      nextOffset: 1000,
+    }));
+    const readNote = vi.fn();
+    const respond = vi.fn<ModelProvider["respond"]>(async (input) => {
+      expect(input.kind).toBe("message");
+      if (input.kind === "message") {
+        expect(input.message.text).toContain(
+          '<vault_text path="data.csv" truncated="true">',
+        );
+        expect(input.message.text).toContain("A,B\n1,2");
+        expect(input.message.text).toContain(
+          '<vault_file path="file.pdf">Stored file reference only.',
+        );
+        expect(input.message.images).toEqual([]);
+      }
+      return { toolCalls: [] };
+    });
+    const provider: ModelProvider = {
+      supportsImages: false,
+      supportsImageToolResults: false,
+      resetConversation: vi.fn(),
+      finishTurn: vi.fn(),
+      abortTurn: vi.fn(),
+      testConnection: vi.fn(),
+      respond,
+    };
+    await new LocalAgentRuntime(
+      settings,
+      { readTextFile, readNote } as unknown as VaultService,
+      provider,
+    ).send(
+      "test",
+      [
+        { id: "1", kind: "text", path: "data.csv", name: "data.csv" },
+        { id: "2", kind: "file", path: "file.pdf", name: "file.pdf" },
+      ],
+      { onTextDelta: vi.fn(), onToolActivity: vi.fn(), onUsage: vi.fn() },
+      new AbortController().signal,
+    );
+    expect(readTextFile).toHaveBeenCalledWith("data.csv", 1000);
+    expect(readNote).not.toHaveBeenCalled();
+  });
 });

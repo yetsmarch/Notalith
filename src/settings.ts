@@ -8,6 +8,8 @@ import {
   setIcon,
 } from "obsidian";
 import type NotalithPlugin from "./main";
+import { createId } from "./services/id-utils";
+import { validateVaultPath } from "./services/path-utils";
 import {
   defaultConnections,
   PROVIDER_IDS,
@@ -34,6 +36,7 @@ export const DEFAULT_SETTINGS: NotalithSettings = {
   includeEmbeddedImages: true,
   maxNoteCharacters: 30_000,
   maxToolRounds: 6,
+  attachmentFolder: "",
 };
 
 export class NotalithSettingTab extends PluginSettingTab {
@@ -82,6 +85,37 @@ export class NotalithSettingTab extends PluginSettingTab {
     this.renderProvider(containerEl, selectedProviderId);
 
     new Setting(containerEl).setName("Context").setHeading();
+
+    new Setting(containerEl)
+      .setName("Imported attachment folder")
+      .setDesc(
+        "Vault-relative folder for imported files. Leave empty to use Obsidian's attachment location, relative to the current note.",
+      )
+      .addText((text) => {
+        text.setValue(this.plugin.settings.attachmentFolder);
+        text.inputEl.addEventListener("change", () => {
+          void (async () => {
+            const previous = this.plugin.settings.attachmentFolder;
+            try {
+              const value = text.getValue().trim();
+              this.plugin.settings.attachmentFolder = value
+                ? validateVaultPath(value, this.app.vault.configDir)
+                : "";
+              await this.plugin.saveSettings();
+            } catch (error) {
+              this.plugin.settings.attachmentFolder = previous;
+              text.setValue(previous);
+              console.error(
+                "[Notalith] Failed to save attachment folder",
+                error,
+              );
+              new Notice(
+                error instanceof Error ? error.message : String(error),
+              );
+            }
+          })();
+        });
+      });
 
     new Setting(containerEl)
       .setName("Include embedded images")
@@ -210,19 +244,41 @@ export class NotalithSettingTab extends PluginSettingTab {
       )
       .addButton((button) =>
         button.setButtonText("Add model").onClick(async () => {
-          const model: ModelProfile = {
-            id: crypto.randomUUID(),
-            connectionId: id,
-            displayName: id === "deepseek" ? "DeepSeek Chat" : "New model",
-            modelId: id === "deepseek" ? "deepseek-chat" : "",
-          };
-          this.plugin.settings.models.push(model);
-          this.openModels.add(model.id);
-          if (!this.plugin.settings.activeModelId && model.modelId) {
-            this.plugin.settings.activeModelId = model.id;
+          button.setDisabled(true);
+          const previousActiveId = this.plugin.settings.activeModelId;
+          let model: ModelProfile | undefined;
+          try {
+            model = {
+              id: createId(),
+              connectionId: id,
+              displayName: id === "deepseek" ? "DeepSeek Chat" : "New model",
+              modelId: id === "deepseek" ? "deepseek-chat" : "",
+            };
+            this.plugin.settings.models.push(model);
+            this.openModels.add(model.id);
+            if (!this.plugin.settings.activeModelId && model.modelId) {
+              this.plugin.settings.activeModelId = model.id;
+            }
+            await this.plugin.saveSettings();
+            this.display();
+          } catch (error) {
+            if (model) {
+              const modelId = model.id;
+              this.plugin.settings.models = this.plugin.settings.models.filter(
+                (item) => item.id !== modelId,
+              );
+              this.openModels.delete(modelId);
+              if (this.plugin.settings.activeModelId === modelId) {
+                this.plugin.settings.activeModelId = previousActiveId;
+              }
+            }
+            console.error("[Notalith] Failed to add model", error);
+            new Notice(
+              `Unable to add model: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          } finally {
+            button.setDisabled(false);
           }
-          await this.plugin.saveSettings();
-          this.display();
         }),
       );
   }

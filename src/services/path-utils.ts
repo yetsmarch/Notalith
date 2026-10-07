@@ -46,6 +46,41 @@ export function imageMimeType(extension: string): string | null {
   }
 }
 
+export function isTextExtension(extension: string): boolean {
+  return new Set([
+    "md",
+    "txt",
+    "json",
+    "csv",
+    "tsv",
+    "yaml",
+    "yml",
+    "xml",
+    "html",
+    "css",
+    "js",
+    "ts",
+    "log",
+    "ini",
+    "toml",
+  ]).has(extension.toLowerCase());
+}
+
+export function validateAttachmentName(name: string): string {
+  if (
+    !name ||
+    name === "." ||
+    name === ".." ||
+    /[\\/:*?"<>|]/.test(name) ||
+    Array.from(name).some((character) => character.charCodeAt(0) < 32) ||
+    /[. ]$/.test(name) ||
+    /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name)
+  ) {
+    throw new Error(`Invalid attachment filename: ${name}`);
+  }
+  return name;
+}
+
 export function arrayBufferToBase64(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer);
   const chunkSize = 0x8000;

@@ -306,3 +306,6 @@
     margin: var(--size-2-3);
   }
 }
+.notalith-file-input {
+  display: none;
+}

@@ -12,4 +12,24 @@ describe("strict tool definitions", () => {
       expect(tool.strict).toBe(true);
     }
   });
+  it("uses strict nested frontmatter filter objects", () => {
+    const search = READ_ONLY_TOOLS.find(
+      (tool) => tool.name === "search_notes",
+    )!;
+    const properties = search.parameters.properties as Record<
+      string,
+      {
+        items?: {
+          properties: Record<string, unknown>;
+          required: string[];
+          additionalProperties: boolean;
+        };
+      }
+    >;
+    const filter = properties.properties.items!;
+    expect([...filter.required].sort()).toEqual(
+      Object.keys(filter.properties).sort(),
+    );
+    expect(filter.additionalProperties).toBe(false);
+  });
 });

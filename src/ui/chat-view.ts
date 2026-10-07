@@ -11,6 +11,13 @@ import {
 import type { ChatMessage, ContextAttachment, ProviderUsage } from "../types";
 import type NotalithPlugin from "../main";
 import { PROVIDER_IDS, PROVIDER_NAMES } from "../services/provider-settings";
+import { createId } from "../services/id-utils";
+import { imageMimeType, isTextExtension } from "../services/path-utils";
+import { isOfficeExtension } from "../services/office-document-service";
+import {
+  MAX_ATTACHMENT_BYTES,
+  MAX_IMAGE_BYTES,
+} from "../services/vault-service";
 
 export const NOTALITH_VIEW_TYPE = "notalith-chat";
 
@@ -34,7 +41,7 @@ class VaultFileSuggestModal extends FuzzySuggestModal<TFile> {
     plugin: NotalithPlugin,
   ) {
     super(plugin.app);
-    this.setPlaceholder("Choose a note or image...");
+    this.setPlaceholder("Choose a vault file...");
   }
 
   getItems(): TFile[] {
@@ -129,7 +136,7 @@ export class NotalithChatView extends ItemView {
     setIcon(icon, "bot");
     empty.createEl("h3", { text: "Chat with your vault" });
     empty.createEl("p", {
-      text: "Attach notes, selections, or images. Notalith can also search and read notes with read-only tools.",
+      text: "Attach or import files. Notalith can search your vault, explore note relationships, and edit Markdown.",
     });
 
     const composer = root.createDiv({ cls: "notalith-composer" });
@@ -170,6 +177,25 @@ export class NotalithChatView extends ItemView {
     this.iconButton(attachmentActions, "paperclip", "Choose vault file", () =>
       this.chooseVaultFile(),
     );
+    const fileInput = attachmentActions.createEl("input", {
+      cls: "notalith-file-input",
+      attr: {
+        type: "file",
+        multiple: "",
+        "aria-label": "Import files into vault",
+      },
+    });
+    const importButton = this.iconButton(
+      attachmentActions,
+      "upload",
+      "Import files into vault",
+      () => fileInput.click(),
+    );
+    fileInput.addEventListener("change", () => {
+      const files = Array.from(fileInput.files ?? []);
+      fileInput.value = "";
+      void this.importFiles(files, importButton);
+    });
 
     const responseActions = toolbar.createDiv({
       cls: "notalith-toolbar-group notalith-response-actions",
@@ -284,14 +310,14 @@ export class NotalithChatView extends ItemView {
     }
 
     const userMessage: UiChatMessage = {
-      id: crypto.randomUUID(),
+      id: createId(),
       role: "user",
       text: prompt,
       createdAt: Date.now(),
       attachments: [...this.attachments],
     };
     const assistantMessage: UiChatMessage = {
-      id: crypto.randomUUID(),
+      id: createId(),
       role: "assistant",
       text: "",
       createdAt: Date.now(),
@@ -453,11 +479,7 @@ export class NotalithChatView extends ItemView {
   }
 
   private chooseVaultFile(): void {
-    const files = [
-      ...this.plugin.vaultService.listAttachableNotes(),
-      ...this.plugin.vaultService.listAttachableImages(),
-      ...this.plugin.vaultService.listAttachableDocuments(),
-    ];
+    const files = this.plugin.vaultService.listAttachableFiles();
     new VaultFileSuggestModal(
       files,
       (file) => void this.attachFile(file),
@@ -467,36 +489,74 @@ export class NotalithChatView extends ItemView {
 
   private async attachFile(file: TFile): Promise<void> {
     try {
-      const image = this.plugin.vaultService
-        .listAttachableImages()
-        .some((candidate) => candidate.path === file.path);
-      const office = this.plugin.vaultService
-        .listAttachableDocuments()
-        .some((candidate) => candidate.path === file.path);
-      const attachment: ContextAttachment = image
-        ? {
-            id: crypto.randomUUID(),
-            kind: "image",
-            path: file.path,
-            name: file.name,
-            ...(await this.plugin.vaultService.readImage(file.path)),
-          }
-        : office
+      const image = imageMimeType(file.extension);
+      const office = isOfficeExtension(file.extension);
+      const attachment: ContextAttachment =
+        image && file.stat.size <= MAX_IMAGE_BYTES
           ? {
-              id: crypto.randomUUID(),
-              kind: "document",
+              id: createId(),
+              kind: "image",
               path: file.path,
               name: file.name,
+              ...(await this.plugin.vaultService.readImage(file.path)),
             }
-          : {
-              id: crypto.randomUUID(),
-              kind: "note",
-              path: file.path,
-              name: file.basename,
-            };
+          : office
+            ? {
+                id: createId(),
+                kind: "document",
+                path: file.path,
+                name: file.name,
+              }
+            : {
+                id: createId(),
+                kind:
+                  file.extension === "md"
+                    ? "note"
+                    : isTextExtension(file.extension)
+                      ? "text"
+                      : "file",
+                path: file.path,
+                name: file.extension === "md" ? file.basename : file.name,
+              };
       this.addAttachment(attachment);
+      if (attachment.kind === "file")
+        new Notice(
+          image
+            ? `${file.name}: imported as a reference only; image input is limited to 10 MB.`
+            : `${file.name}: stored file reference only; content extraction is not supported for this format.`,
+        );
     } catch (error) {
       new Notice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private async importFiles(
+    files: File[],
+    button: HTMLButtonElement,
+  ): Promise<void> {
+    button.disabled = true;
+    const active = this.app.workspace.getActiveFile();
+    const sourcePath = active?.extension === "md" ? active.path : "";
+    try {
+      for (const file of files) {
+        try {
+          if (file.size > MAX_ATTACHMENT_BYTES)
+            throw new Error(`${file.name}: attachment exceeds 25 MB.`);
+          const imported = await this.plugin.vaultService.importAttachment(
+            file.name,
+            await file.arrayBuffer(),
+            this.plugin.settings.attachmentFolder,
+            sourcePath,
+          );
+          new Notice(`Imported ${imported.file.path}`);
+          await this.attachFile(imported.file);
+        } catch (error) {
+          console.error("[Notalith] Attachment import failed", error);
+          new Notice(error instanceof Error ? error.message : String(error));
+        }
+      }
+    } finally {
+      button.disabled = false;
     }
   }
 
@@ -523,6 +583,25 @@ export class NotalithChatView extends ItemView {
         cls: "notalith-attachment",
       });
       chip?.createSpan({ text: attachment.name });
+      if (chip && attachment.kind !== "selection") {
+        this.iconButton(chip, "link", `Copy link to ${attachment.name}`, () => {
+          void (async () => {
+            try {
+              const active = this.app.workspace.getActiveFile();
+              const { link } = this.plugin.vaultService.generateAttachmentLink(
+                attachment.path,
+                active?.extension === "md" ? active.path : "",
+              );
+              await navigator.clipboard.writeText(link);
+              new Notice("Attachment link copied.");
+            } catch (error) {
+              new Notice(
+                error instanceof Error ? error.message : String(error),
+              );
+            }
+          })();
+        });
+      }
       const remove = chip?.createEl("button", {
         cls: "clickable-icon",
         attr: { "aria-label": `Remove ${attachment.name}` },

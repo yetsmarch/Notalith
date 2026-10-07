@@ -13,6 +13,7 @@ import { NotalithError } from "../types";
 import type { ModelProvider } from "../providers/provider";
 import { MARKDOWN_WRITE_TOOLS, READ_ONLY_TOOLS } from "./tool-definitions";
 import { VaultService } from "./vault-service";
+import type { PropertyFilter, PropertyOperator } from "./note-search";
 
 export interface RuntimeHandlers {
   onTextDelta(delta: string): void;
@@ -154,6 +155,18 @@ export class LocalAgentRuntime {
         context.push(
           `<vault_document path="${this.escapeAttribute(document.path)}" format="${document.format}" truncated="${document.truncated}">\n${document.content}\n</vault_document>`,
         );
+      } else if (attachment.kind === "text") {
+        const text = await this.vault.readTextFile(
+          attachment.path,
+          this.settings.maxNoteCharacters,
+        );
+        context.push(
+          `<vault_text path="${this.escapeAttribute(attachment.path)}" truncated="${text.nextOffset !== null}">\n${text.content}\n</vault_text>`,
+        );
+      } else if (attachment.kind === "file") {
+        context.push(
+          `<vault_file path="${this.escapeAttribute(attachment.path)}">Stored file reference only. This format is not supported for content extraction; no file content was sent.</vault_file>`,
+        );
       } else {
         const note = await this.vault.readNote(
           attachment.path,
@@ -192,6 +205,120 @@ export class LocalAgentRuntime {
     }
 
     switch (call.name) {
+      case "get_backlinks":
+      case "get_outgoing_links":
+      case "get_note_outline": {
+        const path = this.requiredString(args, "path");
+        const offset = this.boundedInteger(args, "offset", 0, 0);
+        const limit = this.boundedInteger(args, "limit", 100, 1, 200);
+        const result =
+          call.name === "get_backlinks"
+            ? this.vault.getBacklinks(path, offset, limit)
+            : call.name === "get_outgoing_links"
+              ? this.vault.getOutgoingLinks(path, offset, limit)
+              : this.vault.getNoteOutline(path, offset, limit);
+        return JSON.stringify(result);
+      }
+      case "get_unresolved_links":
+        return JSON.stringify(
+          this.vault.getUnresolvedLinks(
+            this.nullableString(args, "path"),
+            this.boundedInteger(args, "offset", 0, 0),
+            this.boundedInteger(args, "limit", 100, 1, 200),
+          ),
+        );
+      case "list_tags":
+        return JSON.stringify(
+          this.vault.getTagIndex(
+            this.nullableString(args, "prefix") ?? "",
+            this.boundedInteger(args, "offset", 0, 0),
+            this.boundedInteger(args, "limit", 100, 1, 200),
+          ),
+        );
+      case "get_attachment_link":
+        return JSON.stringify(
+          this.vault.generateAttachmentLink(
+            this.requiredString(args, "path"),
+            this.nullableString(args, "sourcePath") ?? "",
+            this.nullableBoolean(args, "embed"),
+          ),
+        );
+      case "search_notes":
+        return JSON.stringify(
+          await this.vault.searchNotesAdvanced(
+            {
+              query: this.nullableString(args, "query") ?? "",
+              regex: this.nullableBoolean(args, "regex"),
+              caseSensitive: this.nullableBoolean(args, "caseSensitive"),
+              folder: this.nullableString(args, "folder") ?? "",
+              tags: this.tagArguments(args.tags),
+              properties: this.propertyArguments(args.properties),
+              createdAfter: this.nullableString(args, "createdAfter"),
+              createdBefore: this.nullableString(args, "createdBefore"),
+              modifiedAfter: this.nullableString(args, "modifiedAfter"),
+              modifiedBefore: this.nullableString(args, "modifiedBefore"),
+              offset: this.boundedInteger(args, "offset", 0, 0),
+              limit: this.boundedInteger(args, "limit", 100, 1, 200),
+            },
+            signal,
+          ),
+        );
+      case "create_folder":
+        return JSON.stringify({
+          path: await this.vault.createFolder(
+            this.requiredString(args, "path"),
+            signal,
+          ),
+          action: "folder_ready",
+        });
+      case "list_directory":
+      case "get_directory_tree":
+        return JSON.stringify(
+          this.vault.listEntries(
+            this.optionalString(args, "folder", ""),
+            call.name === "get_directory_tree",
+            this.directoryKind(args.kind),
+            this.boundedInteger(args, "offset", 0, 0),
+            this.boundedInteger(args, "limit", 100, 1, 200),
+          ),
+        );
+      case "read_note_range":
+      case "read_text_file":
+        return JSON.stringify(
+          await this.vault.readTextFile(
+            this.requiredString(args, "path"),
+            this.settings.maxNoteCharacters,
+            this.boundedInteger(args, "startLine", 1, 1),
+            args.endLine == null
+              ? null
+              : this.boundedInteger(args, "endLine", 1, 1),
+            this.boundedInteger(args, "offset", 0, 0),
+            call.name === "read_note_range",
+          ),
+        );
+      case "get_active_note":
+        return JSON.stringify(this.vault.getActiveNote());
+      case "get_editor_selection":
+        return JSON.stringify(
+          this.vault.getEditorContext(this.settings.maxNoteCharacters),
+        );
+      case "get_cursor_position": {
+        const context = this.vault.getEditorContext(
+          this.settings.maxNoteCharacters,
+        );
+        return JSON.stringify({
+          path: context.path,
+          cursor: context.cursor,
+          positionBase: context.positionBase,
+        });
+      }
+      case "resolve_wikilink":
+        return JSON.stringify(
+          await this.vault.resolveWikilink(
+            this.requiredString(args, "link"),
+            this.optionalString(args, "sourcePath", ""),
+          ),
+        );
       case "create_note":
         return JSON.stringify({
           path: await this.vault.createMarkdownNote(
@@ -292,6 +419,82 @@ export class LocalAgentRuntime {
     }
   }
 
+  private nullableString(
+    args: Record<string, unknown>,
+    key: string,
+  ): string | null {
+    if (args[key] == null) return null;
+    if (typeof args[key] !== "string")
+      throw new Error(`${key} must be a string or null.`);
+    return args[key];
+  }
+
+  private nullableBoolean(args: Record<string, unknown>, key: string): boolean {
+    if (args[key] == null) return false;
+    if (typeof args[key] !== "boolean")
+      throw new Error(`${key} must be a boolean or null.`);
+    return args[key];
+  }
+
+  private tagArguments(value: unknown): string[] {
+    if (value == null) return [];
+    if (
+      !Array.isArray(value) ||
+      !value.every((tag: unknown) => typeof tag === "string" && !!tag.trim())
+    )
+      throw new Error("tags must be an array of non-empty strings or null.");
+    return value.map((tag: string) => tag.trim());
+  }
+
+  private propertyArguments(value: unknown): PropertyFilter[] {
+    if (value == null) return [];
+    if (!Array.isArray(value))
+      throw new Error("properties must be an array or null.");
+    const operators: PropertyOperator[] = [
+      "exists",
+      "equals",
+      "not_equals",
+      "contains",
+      "gt",
+      "gte",
+      "lt",
+      "lte",
+    ];
+    return value.map((entry: unknown): PropertyFilter => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry))
+        throw new Error("Invalid property filter.");
+      const record = entry as Record<string, unknown>;
+      const operator = operators.find((item) => item === record.operator);
+      const scalar = record.value;
+      if (
+        typeof record.key !== "string" ||
+        !record.key.trim() ||
+        record.key
+          .split(".")
+          .some(
+            (part) =>
+              !part || ["__proto__", "prototype", "constructor"].includes(part),
+          ) ||
+        !operator ||
+        !(
+          scalar === null ||
+          typeof scalar === "string" ||
+          typeof scalar === "number" ||
+          typeof scalar === "boolean"
+        )
+      )
+        throw new Error("Invalid property key, operator or scalar value.");
+      if (
+        ["gt", "gte", "lt", "lte"].includes(operator) &&
+        typeof scalar !== "number"
+      )
+        throw new Error(
+          "Numeric property comparisons require a numeric value.",
+        );
+      return { key: record.key, operator, value: scalar };
+    });
+  }
+
   private requiredString(
     args: Record<string, unknown>,
     key: string,
@@ -330,6 +533,42 @@ export class LocalAgentRuntime {
     return typeof value === "number" && Number.isInteger(value)
       ? value
       : fallback;
+  }
+
+  private boundedInteger(
+    args: Record<string, unknown>,
+    key: string,
+    fallback: number,
+    minimum: number,
+    maximum = Number.MAX_SAFE_INTEGER,
+  ): number {
+    const value = args[key];
+    if (value == null) return fallback;
+    if (
+      typeof value !== "number" ||
+      !Number.isSafeInteger(value) ||
+      value < minimum ||
+      value > maximum
+    ) {
+      throw new Error(
+        `${key} must be an integer between ${minimum} and ${maximum}.`,
+      );
+    }
+    return value;
+  }
+
+  private directoryKind(
+    value: unknown,
+  ): "all" | "folder" | "note" | "image" | "office" {
+    if (value == null || value === "all") return "all";
+    if (
+      value === "folder" ||
+      value === "note" ||
+      value === "image" ||
+      value === "office"
+    )
+      return value;
+    throw new Error("Invalid directory kind.");
   }
 
   private optionalFileKind(

@@ -35,6 +35,7 @@ export interface NotalithSettings {
   includeEmbeddedImages: boolean;
   maxNoteCharacters: number;
   maxToolRounds: number;
+  attachmentFolder: string;
 }
 
 export type ChatRole = "user" | "assistant";
@@ -71,6 +72,12 @@ export type ContextAttachment =
   | {
       id: string;
       kind: "document";
+      path: string;
+      name: string;
+    }
+  | {
+      id: string;
+      kind: "text" | "file";
       path: string;
       name: string;
     };
