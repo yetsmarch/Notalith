@@ -1,7 +1,7 @@
 {
   "id": "notalith",
   "name": "Notalith",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "minAppVersion": "1.11.4",
   "description": "Chat with AI models to search, read, and edit Markdown notes in your vault.",
   "author": "wenytang-ms",
