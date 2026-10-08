@@ -1,6 +1,6 @@
 {
   "name": "notalith",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A platform-neutral Obsidian assistant with Azure, Claude, Gemini, DeepSeek, OpenAI, Grok and OpenRouter providers",
   "main": "main.js",
   "scripts": {

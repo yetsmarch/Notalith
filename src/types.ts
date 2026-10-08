@@ -19,12 +19,17 @@ export interface ProviderConnection {
   apiKeySecretId: string;
 }
 
+export type AzureProtocol =
+  "openai-responses" | "openai-chat-completions" | "anthropic-messages";
+
 export interface ModelProfile {
   id: string;
   connectionId: ProviderId;
   displayName: string;
   modelId: string;
   supportsImages?: boolean;
+  azureProtocol?: AzureProtocol;
+  endpointOverride?: string;
 }
 
 export interface NotalithSettings {

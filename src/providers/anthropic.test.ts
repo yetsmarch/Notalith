@@ -124,6 +124,245 @@ describe("Anthropic Messages provider", () => {
     requestUrlMock.mockReset();
   });
 
+  it("preserves streamed thinking signatures and redacted blocks through tool results", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        stream([
+          start,
+          {
+            type: "content_block_start",
+            index: 0,
+            content_block: { type: "thinking", thinking: "" },
+          },
+          {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "thinking_delta", thinking: "Private reasoning" },
+          },
+          {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "signature_delta", signature: "signed-" },
+          },
+          {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "signature_delta", signature: "opaque" },
+          },
+          stopBlock(0),
+          {
+            type: "content_block_start",
+            index: 1,
+            content_block: { type: "redacted_thinking", data: "opaque-data" },
+          },
+          stopBlock(1),
+          {
+            type: "content_block_start",
+            index: 2,
+            content_block: {
+              type: "tool_use",
+              id: "call-1",
+              name: "read_image",
+              input: {},
+            },
+          },
+          {
+            type: "content_block_delta",
+            index: 2,
+            delta: {
+              type: "input_json_delta",
+              partial_json: '{"path":"picture.png"}',
+            },
+          },
+          stopBlock(2),
+          ...end("tool_use"),
+        ]),
+      )
+      .mockResolvedValueOnce(textResponse("Done"))
+      .mockResolvedValueOnce(textResponse("New"));
+    vi.stubGlobal("fetch", fetchMock);
+    const p = makeProvider();
+    const onTextDelta = vi.fn();
+    const observed = { ...handlers(), onTextDelta };
+    const result = await p.respond(
+      message,
+      tools,
+      observed,
+      new AbortController().signal,
+    );
+    expect(onTextDelta).not.toHaveBeenCalled();
+    expect(result.toolCalls).toEqual([
+      {
+        callId: "call-1",
+        name: "read_image",
+        arguments: '{"path":"picture.png"}',
+      },
+    ]);
+    await p.respond(
+      {
+        kind: "tool-results",
+        results: [{ callId: "call-1", output: "image read" }],
+      },
+      tools,
+      handlers(),
+      new AbortController().signal,
+    );
+    expect(jsonBody(fetchMock.mock.calls[1][1]?.body).messages).toEqual([
+      { role: "user", content: "Hi" },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "thinking",
+            thinking: "Private reasoning",
+            signature: "signed-opaque",
+          },
+          { type: "redacted_thinking", data: "opaque-data" },
+          {
+            type: "tool_use",
+            id: "call-1",
+            name: "read_image",
+            input: { path: "picture.png" },
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "call-1", content: "image read" },
+        ],
+      },
+    ]);
+    p.abortTurn();
+    await p.respond(message, [], handlers(), new AbortController().signal);
+    expect(jsonBody(fetchMock.mock.calls[2][1]?.body).messages).toEqual([
+      { role: "user", content: "Hi" },
+    ]);
+  });
+
+  it("preserves completed thinking blocks in fallback history without displaying them", async () => {
+    const thinking = {
+      type: "thinking",
+      thinking: "Reasoning",
+      signature: "signature",
+    };
+    const redacted = { type: "redacted_thinking", data: "hidden" };
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("CORS")));
+    requestUrlMock
+      .mockResolvedValueOnce({
+        status: 200,
+        text: "",
+        json: completed([thinking, redacted, { type: "text", text: "Answer" }]),
+      })
+      .mockResolvedValueOnce({
+        status: 200,
+        text: "",
+        json: completed([{ type: "text", text: "Next" }]),
+      });
+    const p = makeProvider();
+    const onTextDelta = vi.fn();
+    const observed = { ...handlers(), onTextDelta };
+    await p.respond(message, [], observed, new AbortController().signal);
+    expect(onTextDelta).toHaveBeenCalledExactlyOnceWith("Answer");
+    p.finishTurn();
+    await p.respond(message, [], handlers(), new AbortController().signal);
+    expect(jsonBody(requestUrlMock.mock.calls[1][0].body).messages).toEqual([
+      { role: "user", content: "Hi" },
+      {
+        role: "assistant",
+        content: [thinking, redacted, { type: "text", text: "Answer" }],
+      },
+      { role: "user", content: "Hi" },
+    ]);
+  });
+
+  it("rejects unsigned streamed thinking without committing history", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        stream([
+          start,
+          {
+            type: "content_block_start",
+            index: 0,
+            content_block: { type: "thinking", thinking: "" },
+          },
+          stopBlock(0),
+          {
+            ...textStart,
+            index: 1,
+            content_block: { type: "text", text: "Answer" },
+          },
+          stopBlock(1),
+          ...end("end_turn"),
+        ]),
+      )
+      .mockResolvedValueOnce(textResponse());
+    vi.stubGlobal("fetch", fetchMock);
+    const p = makeProvider();
+    await expect(
+      p.respond(message, [], handlers(), new AbortController().signal),
+    ).rejects.toThrow("thinking signature");
+    expect(requestUrlMock).not.toHaveBeenCalled();
+    p.abortTurn();
+    await p.respond(message, [], handlers(), new AbortController().signal);
+    expect(jsonBody(fetchMock.mock.calls[1][1]?.body).messages).toHaveLength(1);
+  });
+
+  it("does not retain thinking from a cancelled response and clears it on reset", async () => {
+    const thoughtResponse = () =>
+      stream([
+        start,
+        {
+          type: "content_block_start",
+          index: 0,
+          content_block: { type: "thinking", thinking: "", signature: "" },
+        },
+        {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "thinking_delta", thinking: "Reasoning" },
+        },
+        {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "signature_delta", signature: "opaque" },
+        },
+        stopBlock(0),
+        {
+          ...textStart,
+          index: 1,
+          content_block: { type: "text", text: "Answer" },
+        },
+        stopBlock(1),
+        ...end("end_turn"),
+      ]);
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(thoughtResponse())
+      .mockResolvedValueOnce(thoughtResponse())
+      .mockResolvedValueOnce(textResponse());
+    vi.stubGlobal("fetch", fetchMock);
+    const p = makeProvider();
+    const controller = new AbortController();
+    await expect(
+      p.respond(
+        message,
+        [],
+        { ...handlers(), onTextDelta: () => controller.abort() },
+        controller.signal,
+      ),
+    ).rejects.toMatchObject({ category: "cancelled" });
+    p.abortTurn();
+    await p.respond(message, [], handlers(), new AbortController().signal);
+    expect(jsonBody(fetchMock.mock.calls[1][1]?.body).messages).toHaveLength(1);
+    p.finishTurn();
+    p.resetConversation();
+    await p.respond(message, [], handlers(), new AbortController().signal);
+    expect(jsonBody(fetchMock.mock.calls[2][1]?.body).messages).toHaveLength(1);
+  });
+
   it("uses native headers, schema and SSE text/usage without leaking the key into the body", async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(textResponse());
     vi.stubGlobal("fetch", fetchMock);

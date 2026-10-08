@@ -16,6 +16,10 @@ import { NotalithError } from "../types";
 import type { ModelProvider } from "./provider";
 
 type TextBlock = { type: "text"; text: string };
+type ThinkingBlock = { type: "thinking"; thinking: string; signature: string };
+type RedactedThinkingBlock = { type: "redacted_thinking"; data: string };
+type AssistantBlock =
+  TextBlock | ToolUseBlock | ThinkingBlock | RedactedThinkingBlock;
 type ImageBlock = {
   type: "image";
   source: { type: "base64"; media_type: string; data: string };
@@ -31,14 +35,14 @@ type ToolResultBlock = {
   tool_use_id: string;
   content: string | Array<TextBlock | ImageBlock>;
 };
-type MessageBlock = TextBlock | ImageBlock | ToolUseBlock | ToolResultBlock;
+type MessageBlock = AssistantBlock | ImageBlock | ToolResultBlock;
 type Message = {
   role: "user" | "assistant";
   content: string | MessageBlock[];
 };
 type AssistantMessage = {
   role: "assistant";
-  content: Array<TextBlock | ToolUseBlock>;
+  content: AssistantBlock[];
 };
 type Completion = {
   message: AssistantMessage;
@@ -47,6 +51,8 @@ type Completion = {
 };
 type PartialBlock =
   | { type: "text"; text: string }
+  | ThinkingBlock
+  | RedactedThinkingBlock
   | {
       type: "tool_use";
       id: string;
@@ -73,6 +79,7 @@ export class AnthropicProvider implements ModelProvider {
     private readonly model: ModelProfile,
     private readonly systemPrompt: string,
     private readonly getApiKey: () => string | null,
+    private readonly options: { name?: string; endpoint?: () => string } = {},
   ) {}
 
   get supportsImages(): boolean {
@@ -117,7 +124,7 @@ export class AnthropicProvider implements ModelProvider {
       this.parseCompletion(response.json);
       return {
         ok: true,
-        message: `Connected to Anthropic model "${this.model.modelId}".`,
+        message: `Connected to ${this.options.name ?? "Anthropic"} model "${this.model.modelId}".`,
       };
     } catch (error) {
       return { ok: false, message: this.normalizeError(error).message };
@@ -421,6 +428,22 @@ export class AnthropicProvider implements ModelProvider {
           blocks.set(index, { type: "text", text: block.text });
           if (block.text) handlers.onTextDelta(block.text);
         } else if (
+          block?.type === "thinking" &&
+          typeof block.thinking === "string" &&
+          (block.signature === undefined || typeof block.signature === "string")
+        ) {
+          blocks.set(index, {
+            type: "thinking",
+            thinking: block.thinking,
+            signature: block.signature ?? "",
+          });
+        } else if (
+          block?.type === "redacted_thinking" &&
+          typeof block.data === "string" &&
+          block.data
+        ) {
+          blocks.set(index, { type: "redacted_thinking", data: block.data });
+        } else if (
           block?.type === "tool_use" &&
           typeof block.id === "string" &&
           block.id &&
@@ -457,6 +480,18 @@ export class AnthropicProvider implements ModelProvider {
         ) {
           block.text += delta.text;
           if (delta.text) handlers.onTextDelta(delta.text);
+        } else if (
+          block.type === "thinking" &&
+          delta.type === "thinking_delta" &&
+          typeof delta.thinking === "string"
+        ) {
+          block.thinking += delta.thinking;
+        } else if (
+          block.type === "thinking" &&
+          delta.type === "signature_delta" &&
+          typeof delta.signature === "string"
+        ) {
+          block.signature += delta.signature;
         } else if (
           block.type === "tool_use" &&
           delta.type === "input_json_delta" &&
@@ -517,8 +552,17 @@ export class AnthropicProvider implements ModelProvider {
         );
       const content = [...blocks.entries()]
         .sort(([a], [b]) => a - b)
-        .map(([, block]): TextBlock | ToolUseBlock => {
+        .map(([, block]): AssistantBlock => {
           if (block.type === "text") return { type: "text", text: block.text };
+          if (block.type === "thinking") {
+            if (!block.signature)
+              throw new NotalithError(
+                "Missing Anthropic thinking signature.",
+                "provider",
+              );
+            return { ...block };
+          }
+          if (block.type === "redacted_thinking") return { ...block };
           let input: unknown = block.input;
           if (block.json) {
             try {
@@ -566,10 +610,29 @@ export class AnthropicProvider implements ModelProvider {
         "Invalid Anthropic Messages response.",
         "provider",
       );
-    const content = response.content.map((item): TextBlock | ToolUseBlock => {
+    const content = response.content.map((item): AssistantBlock => {
       const block = this.asRecord(item);
       if (block?.type === "text" && typeof block.text === "string")
         return { type: "text", text: block.text };
+      if (
+        block?.type === "thinking" &&
+        typeof block.thinking === "string" &&
+        typeof block.signature === "string" &&
+        block.signature
+      ) {
+        return {
+          type: "thinking",
+          thinking: block.thinking,
+          signature: block.signature,
+        };
+      }
+      if (
+        block?.type === "redacted_thinking" &&
+        typeof block.data === "string" &&
+        block.data
+      ) {
+        return { type: "redacted_thinking", data: block.data };
+      }
       if (
         block?.type === "tool_use" &&
         typeof block.id === "string" &&
@@ -598,7 +661,7 @@ export class AnthropicProvider implements ModelProvider {
   }
 
   private makeCompletion(
-    content: Array<TextBlock | ToolUseBlock>,
+    content: AssistantBlock[],
     reason: unknown,
     usage?: ProviderUsage,
   ): Completion {
@@ -661,19 +724,18 @@ export class AnthropicProvider implements ModelProvider {
   }
 
   private validateConfiguration(): void {
-    if (!this.connection.endpoint || !this.model.modelId)
+    const endpoint = this.endpoint();
+    const name = this.options.name ?? "Anthropic";
+    if (!endpoint || !this.model.modelId)
       throw new NotalithError(
-        "Configure an Anthropic endpoint and model.",
+        `Configure a ${name} endpoint and model.`,
         "configuration",
       );
     let url: URL;
     try {
-      url = new URL(this.connection.endpoint);
+      url = new URL(endpoint);
     } catch {
-      throw new NotalithError(
-        "Invalid Anthropic endpoint URL.",
-        "configuration",
-      );
+      throw new NotalithError(`Invalid ${name} endpoint URL.`, "configuration");
     }
     if (
       url.protocol !== "https:" &&
@@ -683,26 +745,30 @@ export class AnthropicProvider implements ModelProvider {
       )
     ) {
       throw new NotalithError(
-        "Anthropic endpoint must use HTTPS.",
+        `${name} endpoint must use HTTPS.`,
         "configuration",
       );
     }
     if (!this.getApiKey())
       throw new NotalithError(
-        "Save an Anthropic API key in Notalith settings.",
+        `Save a ${name} API key in Notalith settings.`,
         "authentication",
       );
   }
 
   private messagesUrl(): string {
-    return `${this.connection.endpoint.replace(/\/+$/, "")}/messages`;
+    return `${this.endpoint().replace(/\/+$/, "")}/messages`;
+  }
+
+  private endpoint(): string {
+    return this.options.endpoint?.() ?? this.connection.endpoint;
   }
 
   private headers(): Record<string, string> {
     const key = this.getApiKey();
     if (!key)
       throw new NotalithError(
-        "Anthropic API key is not configured.",
+        `${this.options.name ?? "Anthropic"} API key is not configured.`,
         "authentication",
       );
     return {
@@ -713,12 +779,13 @@ export class AnthropicProvider implements ModelProvider {
   }
 
   private httpError(status: number, body: string): NotalithError {
-    let message = `Anthropic request failed (${status}).`;
+    const name = this.options.name ?? "Anthropic";
+    let message = `${name} request failed (${status}).`;
     let type = "";
     try {
       const error = this.asRecord(this.asRecord(JSON.parse(body))?.error);
       if (typeof error?.message === "string" && error.message)
-        message = `Anthropic request failed (${status}): ${error.message}`;
+        message = `${name} request failed (${status}): ${error.message}`;
       if (typeof error?.type === "string") type = error.type;
     } catch {
       // Non-JSON provider errors still carry their HTTP status.

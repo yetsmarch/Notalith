@@ -2,6 +2,48 @@ import { describe, expect, it } from "vitest";
 import { normalizeProviderSettings, PROVIDER_IDS } from "./provider-settings";
 
 describe("provider settings", () => {
+  it("persists explicit Azure protocol and endpoint overrides without guessing from aliases", () => {
+    const result = normalizeProviderSettings({
+      models: [
+        {
+          id: "claude",
+          connectionId: "azure-foundry",
+          modelId: "custom-alias",
+          azureProtocol: "anthropic-messages",
+          endpointOverride: " https://gateway.test/anthropic/v1/ ",
+          supportsImages: true,
+        },
+        {
+          id: "old",
+          connectionId: "azure-foundry",
+          modelId: "claude-named-but-responses",
+        },
+      ],
+    });
+    expect(result.models[0]).toMatchObject({
+      azureProtocol: "anthropic-messages",
+      endpointOverride: "https://gateway.test/anthropic/v1/",
+      supportsImages: true,
+    });
+    expect(result.models[1].azureProtocol).toBeUndefined();
+    expect(normalizeProviderSettings(result).models).toEqual(result.models);
+  });
+
+  it("reports unsupported persisted Azure protocols rather than silently switching", () => {
+    expect(() =>
+      normalizeProviderSettings({
+        models: [
+          {
+            id: "invalid",
+            connectionId: "azure-foundry",
+            modelId: "alias",
+            azureProtocol: "unknown",
+          },
+        ],
+      }),
+    ).toThrow("Unsupported Azure inference protocol");
+  });
+
   it("migrates Azure deployments without changing their endpoint or secret", () => {
     const settings = normalizeProviderSettings({
       azureEndpoint: "https://example.openai.azure.com/openai/v1",

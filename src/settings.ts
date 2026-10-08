@@ -12,6 +12,8 @@ import { createId } from "./services/id-utils";
 import { validateVaultPath } from "./services/path-utils";
 import {
   defaultConnections,
+  AZURE_PROTOCOLS,
+  isAzureProtocol,
   PROVIDER_IDS,
   PROVIDER_NAMES,
 } from "./services/provider-settings";
@@ -169,7 +171,7 @@ export class NotalithSettingTab extends PluginSettingTab {
       .setName("Endpoint")
       .setDesc(
         id === "azure-foundry"
-          ? "Azure OpenAI v1 endpoint, for example https://resource.openai.azure.com/openai/v1/"
+          ? "Azure OpenAI v1 base URL. Each deployment selects its API protocol; Claude endpoints are derived only for standard Azure resource domains."
           : id === "gemini"
             ? "Native Gemini API base URL, including /v1beta."
             : `${name} API base URL; leave the default unless you use a compatible gateway.`,
@@ -354,7 +356,7 @@ export class NotalithSettingTab extends PluginSettingTab {
       )
       .setDesc(
         model.connectionId === "azure-foundry"
-          ? "Exact Azure deployment name sent to the Responses API."
+          ? "Exact Azure deployment name sent to the selected API. Names do not determine the protocol."
           : `Exact ${PROVIDER_NAMES[model.connectionId]} model ID sent to the provider.`,
       )
       .addText((text) =>
@@ -373,8 +375,55 @@ export class NotalithSettingTab extends PluginSettingTab {
           }),
       );
 
+    if (model.connectionId === "azure-foundry") {
+      new Setting(body)
+        .setName("API protocol")
+        .setDesc(
+          model.azureProtocol === "openai-chat-completions"
+            ? "For model-router, use a services.ai.azure.com/openai/v1 endpoint override. Changing protocol starts a new conversation."
+            : "Choose the API supported by this deployment. Changing it starts a new conversation.",
+        )
+        .addDropdown((dropdown) => {
+          for (const [protocol, label] of Object.entries(AZURE_PROTOCOLS)) {
+            dropdown.addOption(protocol, label);
+          }
+          dropdown
+            .setValue(model.azureProtocol ?? "openai-responses")
+            .onChange(async (value) => {
+              if (!isAzureProtocol(value)) {
+                new Notice("Unknown API protocol.");
+                return;
+              }
+              model.azureProtocol = value;
+              await this.plugin.saveSettings();
+              this.display();
+            });
+        });
+      new Setting(body)
+        .setName("Endpoint override")
+        .setDesc(
+          "Optional protocol-specific API base URL, without the final request route. Required for custom gateways.",
+        )
+        .addText((text) =>
+          text
+            .setPlaceholder(
+              model.azureProtocol === "anthropic-messages"
+                ? "https://resource.services.ai.azure.com/anthropic/v1"
+                : model.azureProtocol === "openai-chat-completions"
+                  ? "https://resource.services.ai.azure.com/openai/v1"
+                  : "https://resource.openai.azure.com/openai/v1",
+            )
+            .setValue(model.endpointOverride ?? "")
+            .onChange(async (value) => {
+              model.endpointOverride = value.trim();
+              await this.plugin.saveSettings();
+            }),
+        );
+    }
+
     if (
-      model.connectionId !== "azure-foundry" &&
+      (model.connectionId !== "azure-foundry" ||
+        (model.azureProtocol ?? "openai-responses") !== "openai-responses") &&
       model.connectionId !== "deepseek"
     ) {
       new Setting(body)

@@ -1,6 +1,6 @@
 import { Plugin } from "obsidian";
 import { AnthropicProvider } from "./providers/anthropic";
-import { AzureFoundryProvider } from "./providers/azure-foundry";
+import { createAzureProvider } from "./providers/azure-provider";
 import { ChatCompletionsProvider } from "./providers/chat-completions";
 import { DeepSeekProvider } from "./providers/deepseek";
 import { GeminiProvider } from "./providers/gemini";
@@ -157,7 +157,10 @@ export default class NotalithPlugin extends Plugin {
       (item) => item.id === model?.connectionId,
     );
     return Boolean(
-      model?.modelId && connection?.endpoint && this.apiKeys[connection.id],
+      model?.modelId &&
+      connection &&
+      (model.endpointOverride || connection.endpoint) &&
+      this.apiKeys[connection.id],
     );
   }
 
@@ -167,8 +170,8 @@ export default class NotalithPlugin extends Plugin {
       return { ok: false, message: "Choose a configured model first." };
     }
     const connection = this.getConnection(model.connectionId);
-    const provider = this.makeProvider(connection, model);
     try {
+      const provider = this.makeProvider(connection, model);
       return await provider.testConnection();
     } catch (error) {
       return {
@@ -223,7 +226,7 @@ export default class NotalithPlugin extends Plugin {
   ): ModelProvider {
     const getApiKey = (): string | null => this.apiKeys[connection.id];
     if (connection.id === "azure-foundry") {
-      return new AzureFoundryProvider(
+      return createAzureProvider(
         connection,
         model,
         this.settings.systemPrompt,
@@ -283,6 +286,8 @@ export default class NotalithPlugin extends Plugin {
       model?.id,
       model?.modelId,
       model?.supportsImages,
+      model?.azureProtocol,
+      model?.endpointOverride,
       connection?.endpoint,
       connection?.apiKeySecretId,
       this.settings.systemPrompt,

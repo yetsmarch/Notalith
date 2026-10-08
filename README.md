@@ -8,7 +8,7 @@ Notalith is free and open source under the [Apache 2.0 license](LICENSE). It has
 
 ## Features
 
-- Azure OpenAI Responses, Claude Messages, native Gemini generateContent, and Chat Completions for DeepSeek, OpenAI, Grok, and OpenRouter.
+- Azure Foundry Responses, Chat Completions and Claude Messages, native Claude Messages and Gemini generateContent, and Chat Completions for DeepSeek, OpenAI, Grok, and OpenRouter.
 - Multiple model profiles across providers, with a separate endpoint and API key for each provider.
 - Streaming assistant responses and cancellable requests.
 - Vault read tools and basic Markdown write tools with visible execution status.
@@ -133,7 +133,7 @@ You provide your own account and API key. Notalith does not charge you, but your
 
 | Provider           | API used               | Default endpoint                                                             |
 | ------------------ | ---------------------- | ---------------------------------------------------------------------------- |
-| Azure Foundry      | Azure OpenAI Responses | Enter your own `https://<resource-name>.openai.azure.com/openai/v1` endpoint |
+| Azure Foundry      | Per-deployment protocol | Enter your own `https://<resource-name>.openai.azure.com/openai/v1` endpoint |
 | DeepSeek           | Chat Completions       | `https://api.deepseek.com`                                                   |
 | Claude (Anthropic) | Messages               | `https://api.anthropic.com/v1`                                               |
 | OpenAI             | Chat Completions       | `https://api.openai.com/v1`                                                  |
@@ -141,7 +141,47 @@ You provide your own account and API key. Notalith does not charge you, but your
 | Gemini (Google)    | Native generateContent | `https://generativelanguage.googleapis.com/v1beta`                           |
 | OpenRouter         | Chat Completions       | `https://openrouter.ai/api/v1`                                               |
 
-For Azure, the **deployment name**, not the underlying model family name, is sent as the Responses API `model` value. For every other provider, enter an exact model ID available to your account. OpenRouter IDs generally include a provider prefix such as `openai/gpt-4.1-mini`. The example IDs shown in settings are placeholders, not a model catalog.
+For Azure, the **deployment name**, not the underlying model family name, is sent as the selected API's `model` value. For every other provider, enter an exact model ID available to your account. OpenRouter IDs generally include a provider prefix such as `openai/gpt-4.1-mini`. The example IDs shown in settings are placeholders, not a model catalog.
+
+### Azure Foundry protocols
+
+Choose **API protocol** for each Azure deployment: **OpenAI Responses** (the
+unchanged default for existing profiles), **OpenAI Chat Completions**, or
+**Claude Messages**. Deployment aliases never determine the protocol, and errors
+do not trigger automatic protocol switching. Changing protocol or endpoint starts
+a new conversation.
+
+For Claude, a standard Azure resource endpoint is mapped to
+`https://<resource-name>.services.ai.azure.com/anthropic/v1`; requests use
+`x-api-key` and `anthropic-version: 2023-06-01`. Custom gateways require an
+explicit **Endpoint override**. Overrides are API base URLs without the final
+`/messages`, `/responses` or `/chat/completions` route, and use the Azure
+connection's saved key. OpenAI protocols use `/openai/v1` base URLs.
+Enable **Image input** only for vision-capable Chat Completions or Claude
+deployments. Chat Completions does not support image tool results.
+
+Claude thinking and redacted-thinking blocks are retained with their signatures
+for subsequent turns and tool results, but are not shown as assistant text.
+The implementation follows the [official Claude on Foundry API examples](https://learn.microsoft.com/azure/foundry/foundry-models/how-to/use-foundry-models-claude)
+without a runtime SDK dependency.
+
+#### Model router
+
+Add your router's exact deployment name (for example `model-router`), select
+**OpenAI Chat Completions**, and set **Endpoint override** to
+`https://<resource-name>.services.ai.azure.com/openai/v1`. This uses the v1
+Chat Completions API without an `api-version` parameter and reuses the Azure
+connection's saved key. The router's selected underlying model can change between
+requests; the plugin continues to send the router deployment name and the full
+conversation/tool history, not the selected model's name.
+
+For the tested resource, the `openai.azure.com/openai/v1` endpoint returned
+deployment-not-found for the router, while the `services.ai.azure.com` v1
+Chat Completions endpoint succeeded. The resource-level v1 Responses endpoint
+reported that the operation was unsupported. Support through Foundry project
+Responses endpoints is a separate API surface. The plugin does not silently
+switch endpoints or protocols. Routing modes and candidate model pools remain
+configured in Foundry, not in the plugin.
 
 ## Manual installation
 

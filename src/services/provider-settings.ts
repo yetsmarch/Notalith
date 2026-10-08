@@ -1,10 +1,25 @@
 import type {
+  AzureProtocol,
   ModelProfile,
   NotalithSettings,
   ProviderConnection,
   ProviderId,
 } from "../types";
 import { normalizeDeployments } from "./deployment-settings";
+import { NotalithError } from "../types";
+
+export const AZURE_PROTOCOLS: Record<AzureProtocol, string> = {
+  "openai-responses": "OpenAI Responses",
+  "openai-chat-completions": "OpenAI Chat Completions",
+  "anthropic-messages": "Claude Messages",
+};
+
+export function isAzureProtocol(value: unknown): value is AzureProtocol {
+  return (
+    typeof value === "string" &&
+    Object.keys(AZURE_PROTOCOLS).includes(value)
+  );
+}
 
 export const PROVIDER_IDS: readonly ProviderId[] = [
   "azure-foundry",
@@ -116,6 +131,16 @@ export function normalizeProviderSettings(
         continue;
       }
       usedIds.add(value.id);
+      if (
+        value.connectionId === "azure-foundry" &&
+        value.azureProtocol !== undefined &&
+        !isAzureProtocol(value.azureProtocol)
+      ) {
+        throw new NotalithError(
+          `Unsupported Azure inference protocol for model "${value.id}".`,
+          "configuration",
+        );
+      }
       models.push({
         id: value.id,
         connectionId: value.connectionId,
@@ -124,6 +149,14 @@ export function normalizeProviderSettings(
             ? value.displayName.trim()
             : value.modelId.trim() || "New model",
         modelId: value.modelId.trim(),
+        ...(value.connectionId === "azure-foundry" &&
+        isAzureProtocol(value.azureProtocol)
+          ? { azureProtocol: value.azureProtocol }
+          : {}),
+        ...(value.connectionId === "azure-foundry" &&
+        typeof value.endpointOverride === "string"
+          ? { endpointOverride: value.endpointOverride.trim() }
+          : {}),
         ...(typeof value.supportsImages === "boolean"
           ? { supportsImages: value.supportsImages }
           : {}),

@@ -45,6 +45,7 @@ export interface ChatProviderOptions {
   name: string;
   supportsImages: boolean;
   preserveReasoning?: boolean;
+  apiKeyHeader?: "api-key";
 }
 
 export class ChatCompletionsProvider implements ModelProvider {
@@ -523,7 +524,9 @@ export class ChatCompletionsProvider implements ModelProvider {
       );
     return {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${key}`,
+      ...(this.options.apiKeyHeader
+        ? { [this.options.apiKeyHeader]: key }
+        : { Authorization: `Bearer ${key}` }),
     };
   }
 
