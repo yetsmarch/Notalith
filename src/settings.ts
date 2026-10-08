@@ -10,6 +10,8 @@ import {
 import type NotalithPlugin from "./main";
 import { createId } from "./services/id-utils";
 import { validateVaultPath } from "./services/path-utils";
+import { DEFAULT_IMAGE_SETTINGS } from "./services/image-settings";
+import { ImageSaveError } from "./services/image-generation";
 import {
   defaultConnections,
   AZURE_PROTOCOLS,
@@ -39,6 +41,7 @@ export const DEFAULT_SETTINGS: NotalithSettings = {
   maxNoteCharacters: 30_000,
   maxToolRounds: 6,
   attachmentFolder: "",
+  imageGeneration: { ...DEFAULT_IMAGE_SETTINGS },
 };
 
 export class NotalithSettingTab extends PluginSettingTab {
@@ -85,6 +88,7 @@ export class NotalithSettingTab extends PluginSettingTab {
       });
 
     this.renderProvider(containerEl, selectedProviderId);
+    this.renderImageGeneration(containerEl);
 
     new Setting(containerEl).setName("Context").setHeading();
 
@@ -160,6 +164,193 @@ export class NotalithSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           });
       });
+  }
+
+  private renderImageGeneration(containerEl: HTMLElement): void {
+    const settings = this.plugin.settings.imageGeneration;
+    let testSetting: Setting | undefined;
+    const statusText = (): string =>
+      `${
+        this.plugin.imageConfigurationError
+          ? `Tool unavailable: ${this.plugin.imageConfigurationError}`
+          : "Enabled and configured (not a connectivity guarantee)."
+      } Testing generates and discards one low-quality image and may incur charges.`;
+    const save = async (): Promise<void> => {
+      await this.plugin.saveSettings();
+      testSetting?.setDesc(statusText());
+    };
+    new Setting(containerEl).setName("Image generation").setHeading();
+    new Setting(containerEl)
+      .setName("Enable image generation")
+      .setDesc(
+        "Expose generate_image to the chat model only when enabled, with a model, endpoint and saved key. Generated images are saved to the attachment folder; notes are not automatically edited.",
+      )
+      .addToggle((toggle) =>
+        toggle.setValue(settings.enabled).onChange(async (value) => {
+          settings.enabled = value;
+          await save();
+          this.display();
+        }),
+      );
+    new Setting(containerEl)
+      .setName("Image connection")
+      .setDesc(
+        "Reuse this provider's endpoint and saved API key, independently of the current chat model.",
+      )
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("azure-foundry", PROVIDER_NAMES["azure-foundry"])
+          .addOption("openai", "OpenAI")
+          .setValue(settings.connectionId)
+          .onChange(async (value) => {
+            if (value !== "azure-foundry" && value !== "openai") {
+              new Notice("Unknown image connection.");
+              return;
+            }
+            settings.connectionId = value;
+            await save();
+            this.display();
+          }),
+      );
+    new Setting(containerEl)
+      .setName(
+        settings.connectionId === "azure-foundry"
+          ? "Image deployment name"
+          : "Image model ID",
+      )
+      .setDesc(
+        "Image-only configuration; this model is not added to the chat model menu.",
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("Enter deployment or model ID")
+          .setValue(settings.modelId)
+          .onChange(async (value) => {
+            settings.modelId = value.trim();
+            await save();
+          }),
+      );
+    new Setting(containerEl)
+      .setName("Image endpoint override")
+      .setDesc(
+        settings.connectionId === "azure-foundry"
+          ? "Optional Azure resource base URL. The standard OpenAI v1 base URL is also accepted; the plugin uses the deployment-specific Images API."
+          : "Optional OpenAI-compatible API base URL including its version, without the final image generation route.",
+      )
+      .addText((text) =>
+        text.setValue(settings.endpointOverride).onChange(async (value) => {
+          settings.endpointOverride = value.trim();
+          await save();
+        }),
+      );
+    if (settings.connectionId === "azure-foundry") {
+      new Setting(containerEl)
+        .setName("Image API version")
+        .setDesc("Deployment API version; the default is 2025-04-01-preview.")
+        .addText((text) =>
+          text.setValue(settings.azureApiVersion).onChange(async (value) => {
+            settings.azureApiVersion = value.trim();
+            await save();
+          }),
+        );
+    }
+    new Setting(containerEl)
+      .setName("Image size")
+      .setDesc(
+        "One PNG per request. Only choose dimensions supported by your image deployment.",
+      )
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("1024x1024", "Square (1024 by 1024)")
+          .addOption("1536x1024", "Landscape (1536 by 1024)")
+          .addOption("1024x1536", "Portrait (1024 by 1536)")
+          .setValue(settings.size)
+          .onChange(async (value) => {
+            if (
+              value !== "1024x1024" &&
+              value !== "1536x1024" &&
+              value !== "1024x1536"
+            ) {
+              new Notice("Unknown image size.");
+              return;
+            }
+            settings.size = value;
+            await save();
+          }),
+      );
+    new Setting(containerEl).setName("Image quality").addDropdown((dropdown) =>
+      dropdown
+        .addOption("low", "Low")
+        .addOption("medium", "Medium")
+        .addOption("high", "High")
+        .setValue(settings.quality)
+        .onChange(async (value) => {
+          if (value !== "low" && value !== "medium" && value !== "high") {
+            new Notice("Unknown image quality.");
+            return;
+          }
+          settings.quality = value;
+          await save();
+        }),
+    );
+    testSetting = new Setting(containerEl)
+      .setName("Image connection test")
+      .setDesc(statusText())
+      .addButton((button) =>
+        button.setButtonText("Test (generates image)").onClick(async () => {
+          button.setDisabled(true);
+          try {
+            new Notice((await this.plugin.testImageConnection()).message);
+          } finally {
+            button.setDisabled(false);
+          }
+        }),
+      );
+    const pending = this.plugin.imageService?.pendingArtifact;
+    if (pending) {
+      new Setting(containerEl)
+        .setName("Unsaved generated image")
+        .setDesc(
+          `${pending.filename}: ${pending.error}. Retained only in memory; retry saving without another generation charge.`,
+        )
+        .addButton((button) =>
+          button.setButtonText("Retry save").onClick(async () => {
+            button.setDisabled(true);
+            try {
+              const artifact = await this.plugin.imageService.retrySave(
+                pending.id,
+                new AbortController().signal,
+              );
+              this.plugin.refreshGeneratedImage(artifact);
+              if (artifact.status === "saved")
+                new Notice(`Saved ${artifact.path}`);
+              this.display();
+            } catch (error) {
+              if (error instanceof ImageSaveError)
+                this.plugin.refreshGeneratedImage(error.artifact);
+              console.error("[Notalith] Generated image save failed", error);
+              new Notice(
+                error instanceof Error ? error.message : String(error),
+              );
+            } finally {
+              button.setDisabled(false);
+            }
+          }),
+        )
+        .addButton((button) =>
+          button.setButtonText("Discard").onClick(() => {
+            try {
+              this.plugin.imageService.discard(pending.id);
+              this.plugin.removeGeneratedImage(pending.id);
+              this.display();
+            } catch (error) {
+              new Notice(
+                error instanceof Error ? error.message : String(error),
+              );
+            }
+          }),
+        );
+    }
   }
 
   private renderProvider(containerEl: HTMLElement, id: ProviderId): void {

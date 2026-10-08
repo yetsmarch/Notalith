@@ -4,6 +4,9 @@ import { createAzureProvider } from "./providers/azure-provider";
 import { ChatCompletionsProvider } from "./providers/chat-completions";
 import { DeepSeekProvider } from "./providers/deepseek";
 import { GeminiProvider } from "./providers/gemini";
+import { OpenAIImageProvider } from "./providers/image-provider";
+import { ImageGenerationService } from "./services/image-generation";
+import { normalizeImageSettings } from "./services/image-settings";
 import type { ModelProvider } from "./providers/provider";
 import { LocalAgentRuntime } from "./services/agent-runtime";
 import {
@@ -18,6 +21,7 @@ import type {
   NotalithSettings,
   ProviderConnection,
   ProviderId,
+  GeneratedImageArtifact,
 } from "./types";
 import { NotalithError } from "./types";
 import { NOTALITH_VIEW_TYPE, NotalithChatView } from "./ui/chat-view";
@@ -34,6 +38,8 @@ export default class NotalithPlugin extends Plugin {
   };
   vaultService!: VaultService;
   runtime: LocalAgentRuntime | null = null;
+  imageService!: ImageGenerationService;
+  imageConfigurationError: string | null = "Image generation is disabled.";
 
   private provider: ModelProvider | null = null;
   private providerSignature = "";
@@ -105,6 +111,7 @@ export default class NotalithPlugin extends Plugin {
         typeof settings.attachmentFolder === "string"
           ? settings.attachmentFolder
           : DEFAULT_SETTINGS.attachmentFolder,
+      imageGeneration: normalizeImageSettings(stored?.imageGeneration),
       ...normalizeProviderSettings(stored),
     };
     if (this.settings.systemPrompt === LEGACY_SYSTEM_PROMPT) {
@@ -276,8 +283,64 @@ export default class NotalithPlugin extends Plugin {
     throw new NotalithError("Unsupported model provider.", "configuration");
   }
 
+  private makeImageProvider(): OpenAIImageProvider | null {
+    const settings = this.settings.imageGeneration;
+    const connection = this.getConnection(settings.connectionId);
+    const key = this.apiKeys[settings.connectionId];
+    if (!settings.enabled) {
+      this.imageConfigurationError = "Image generation is disabled.";
+      return null;
+    }
+    const provider = new OpenAIImageProvider(
+      connection,
+      { ...settings },
+      () => key,
+    );
+    try {
+      provider.validateConfiguration();
+      this.imageConfigurationError = null;
+      return provider;
+    } catch (error) {
+      this.imageConfigurationError =
+        error instanceof Error ? error.message : String(error);
+      return null;
+    }
+  }
+
+  async testImageConnection(): Promise<ConnectionTestResult> {
+    try {
+      const settings = this.settings.imageGeneration;
+      const connection = this.getConnection(settings.connectionId);
+      const provider = new OpenAIImageProvider(
+        connection,
+        { ...settings, size: "1024x1024", quality: "low" },
+        () => this.apiKeys[settings.connectionId],
+      );
+      await provider.generate(
+        "A small blue circle on a white background.",
+        new AbortController().signal,
+      );
+      return {
+        ok: true,
+        message:
+          "Image connection test passed. One test image was generated and discarded; usage charges may apply.",
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
   private createServices(): void {
     if (!this.vaultService) this.vaultService = new VaultService(this.app);
+    if (!this.imageService)
+      this.imageService = new ImageGenerationService(this.vaultService);
+    this.imageService.configure(
+      this.makeImageProvider(),
+      this.settings.attachmentFolder,
+    );
     const model = this.getActiveModel();
     const connection = this.settings.connections.find(
       (item) => item.id === model?.connectionId,
@@ -292,6 +355,10 @@ export default class NotalithPlugin extends Plugin {
       connection?.apiKeySecretId,
       this.settings.systemPrompt,
       connection && this.apiKeys[connection.id],
+      this.settings.imageGeneration,
+      this.settings.attachmentFolder,
+      this.getConnection(this.settings.imageGeneration.connectionId).endpoint,
+      this.apiKeys[this.settings.imageGeneration.connectionId],
     ]);
     if (signature === this.providerSignature) return;
     this.providerSignature = signature;
@@ -299,13 +366,30 @@ export default class NotalithPlugin extends Plugin {
     this.provider =
       model && connection ? this.makeProvider(connection, model) : null;
     this.runtime = this.provider
-      ? new LocalAgentRuntime(this.settings, this.vaultService, this.provider)
+      ? new LocalAgentRuntime(
+          this.settings,
+          this.vaultService,
+          this.provider,
+          this.imageService,
+        )
       : null;
   }
 
   private refreshChatViews(): void {
     for (const leaf of this.app.workspace.getLeavesOfType(NOTALITH_VIEW_TYPE)) {
       (leaf.view as NotalithChatView).refreshModelMenu();
+    }
+  }
+
+  refreshGeneratedImage(artifact: GeneratedImageArtifact): void {
+    for (const leaf of this.app.workspace.getLeavesOfType(NOTALITH_VIEW_TYPE)) {
+      (leaf.view as NotalithChatView).updateGeneratedImage(artifact);
+    }
+  }
+
+  removeGeneratedImage(id: string): void {
+    for (const leaf of this.app.workspace.getLeavesOfType(NOTALITH_VIEW_TYPE)) {
+      (leaf.view as NotalithChatView).removeGeneratedImage(id);
     }
   }
 }

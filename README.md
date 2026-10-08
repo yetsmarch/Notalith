@@ -19,6 +19,7 @@ Notalith is free and open source under the [Apache 2.0 license](LICENSE). It has
 - Vision input from Vault images and images embedded in Markdown notes when the selected model supports it.
 - Local DOCX, PPTX, and XLSX text/table extraction.
 - Obsidian `SecretStorage` for provider API keys.
+- Optional image-generation tool shared by all chat providers, with independent Azure/OpenAI image configuration, Vault saving and previews.
 - Desktop and mobile-compatible architecture based on public Obsidian APIs.
 
 Model, message, and attachment IDs use native `crypto.randomUUID()` where
@@ -234,6 +235,48 @@ Only profiles with a non-empty model ID appear in the chat menu; a saved key is 
 API keys are stored in Obsidian `SecretStorage`; they are not written to plugin `data.json`, notes, or chat content. Provider reasoning metadata and Gemini thought signatures needed to continue tool calls are held only in memory, never shown in chat, and cleared with the conversation.
 
 ## Usage
+
+### Image generation tool
+
+Under **Settings → Notalith → Image generation**, select an Azure Foundry or
+OpenAI connection and enter the image deployment/model ID (for example,
+`gpt-image-2`). Image configuration is separate from the chat model menu and
+reuses the selected connection's saved key. Enable **Image generation** to
+expose `generate_image` to the current chat provider. Disabled or incomplete
+configuration does not advertise the tool. An enabled/configured status is not
+a connectivity guarantee.
+
+Azure uses the deployment-specific Images API with the configurable
+`2025-04-01-preview` version by default. A standard `/openai/v1` connection base
+URL is accepted and converted to the deployment route; a custom image endpoint
+override should be the Azure resource base URL. OpenAI uses its API base URL
+and `/images/generations`. The implementation follows the
+[official Azure image-generation examples](https://learn.microsoft.com/azure/foundry/openai/how-to/dall-e).
+
+The first version supports text-to-image, one PNG per request, three preset sizes
+and low/medium/high quality. Choose parameters supported by your deployment;
+editing, masks and batch generation are not implemented. The **Test** button
+generates and discards one low-quality test image and can incur charges.
+No image request is made just by configuring or enabling the tool.
+
+Ask any function-calling chat model to generate an image. The plugin saves it
+using the existing attachment folder/location rules and non-overwriting names,
+then returns only the saved path and embed link to the chat model, not Base64
+image data. The chat displays an image card independently of the model's text.
+Use **Copy embed link** or **Insert into note**; insertion explicitly selects a
+Markdown note and appends an embed. Generation itself never changes a note.
+If explicitly requested, the chat agent can insert the returned embed using
+the existing Markdown write tools.
+
+Generation requests are not automatically retried. After an image failure,
+further generation attempts in that chat turn are blocked to avoid accidental
+duplicate billing. If generation succeeds but saving fails, the image is kept
+in memory with **Retry save** and **Discard** actions in chat and settings.
+Retrying save does not call the image API again. Save or discard the pending
+image before another generation; reloading or unloading the plugin loses an
+unsaved image. Cancellation stops subsequent saves/edits where possible, but
+Obsidian's non-streaming request cannot cancel a server-side billed generation,
+and already saved images or completed note edits are not undone.
 
 Open Notalith from the ribbon or run **Notalith: Open chat** from the command palette.
 

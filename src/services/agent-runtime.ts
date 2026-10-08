@@ -8,10 +8,16 @@ import type {
   ProviderUsage,
   ToolCall,
   ToolOutput,
+  GeneratedImageArtifact,
 } from "../types";
 import { NotalithError } from "../types";
 import type { ModelProvider } from "../providers/provider";
-import { MARKDOWN_WRITE_TOOLS, READ_ONLY_TOOLS } from "./tool-definitions";
+import {
+  GENERATE_IMAGE_TOOL,
+  MARKDOWN_WRITE_TOOLS,
+  READ_ONLY_TOOLS,
+} from "./tool-definitions";
+import { ImageGenerationService, ImageSaveError } from "./image-generation";
 import { VaultService } from "./vault-service";
 import type { PropertyFilter, PropertyOperator } from "./note-search";
 
@@ -23,6 +29,7 @@ export interface RuntimeHandlers {
     summary: string;
   }): void;
   onUsage(usage: ProviderUsage): void;
+  onGeneratedImage?(artifact: GeneratedImageArtifact): void;
 }
 
 export class LocalAgentRuntime {
@@ -30,6 +37,7 @@ export class LocalAgentRuntime {
     private readonly settings: NotalithSettings,
     private readonly vault: VaultService,
     private readonly provider: ModelProvider,
+    private readonly images?: ImageGenerationService,
   ) {}
 
   resetConversation(): void {
@@ -41,6 +49,7 @@ export class LocalAgentRuntime {
     attachments: ContextAttachment[],
     handlers: RuntimeHandlers,
     signal: AbortSignal,
+    sourcePath = "",
   ): Promise<void> {
     const input = await this.buildInput(prompt, attachments);
     if (input.images.length && !this.provider.supportsImages) {
@@ -55,7 +64,9 @@ export class LocalAgentRuntime {
         ? READ_ONLY_TOOLS
         : READ_ONLY_TOOLS.filter((tool) => tool.name !== "read_image")),
       ...MARKDOWN_WRITE_TOOLS,
+      ...(this.images?.available ? [GENERATE_IMAGE_TOOL] : []),
     ];
+    let imageGenerationFailed = false;
 
     try {
       for (let round = 0; round <= this.settings.maxToolRounds; round++) {
@@ -97,10 +108,24 @@ export class LocalAgentRuntime {
           handlers.onToolActivity({
             name: call.name,
             status: "running",
-            summary: "Running vault tool...",
+            summary:
+              call.name === "generate_image"
+                ? "Generating image..."
+                : "Running vault tool...",
           });
           try {
-            const output = await this.executeTool(call, signal);
+            if (call.name === "generate_image" && imageGenerationFailed) {
+              throw new NotalithError(
+                "Image generation already failed in this turn. Do not retry automatically; ask the user before another billed request.",
+                "tool",
+              );
+            }
+            const output = await this.executeTool(
+              call,
+              signal,
+              handlers,
+              sourcePath,
+            );
             outputs.push({ callId: call.callId, output });
             handlers.onToolActivity({
               name: call.name,
@@ -108,6 +133,10 @@ export class LocalAgentRuntime {
               summary: this.toolSummary(call),
             });
           } catch (error) {
+            if (call.name === "generate_image") imageGenerationFailed = true;
+            if (error instanceof ImageSaveError)
+              handlers.onGeneratedImage?.(error.artifact);
+            if (signal.aborted) throw error;
             const message =
               error instanceof Error ? error.message : String(error);
             outputs.push({
@@ -192,6 +221,8 @@ export class LocalAgentRuntime {
   private async executeTool(
     call: ToolCall,
     signal: AbortSignal,
+    handlers: RuntimeHandlers,
+    sourcePath: string,
   ): Promise<string | Array<Record<string, unknown>>> {
     let args: Record<string, unknown>;
     try {
@@ -205,6 +236,18 @@ export class LocalAgentRuntime {
     }
 
     switch (call.name) {
+      case "generate_image": {
+        if (!this.images?.available)
+          throw new NotalithError("Image generation is unavailable.", "tool");
+        const artifact = await this.images.generate(
+          this.requiredString(args, "prompt"),
+          this.nullableString(args, "filename"),
+          this.nullableString(args, "sourcePath") ?? sourcePath,
+          signal,
+        );
+        handlers.onGeneratedImage?.(artifact);
+        return JSON.stringify({ images: [artifact] });
+      }
       case "get_backlinks":
       case "get_outgoing_links":
       case "get_note_outline": {

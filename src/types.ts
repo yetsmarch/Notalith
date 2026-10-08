@@ -41,7 +41,28 @@ export interface NotalithSettings {
   maxNoteCharacters: number;
   maxToolRounds: number;
   attachmentFolder: string;
+  imageGeneration: ImageGenerationSettings;
 }
+
+export interface ImageGenerationSettings {
+  enabled: boolean;
+  connectionId: "azure-foundry" | "openai";
+  modelId: string;
+  endpointOverride: string;
+  azureApiVersion: string;
+  size: "1024x1024" | "1536x1024" | "1024x1536";
+  quality: "low" | "medium" | "high";
+}
+
+export type GeneratedImageArtifact =
+  | {
+      id: string;
+      status: "saved";
+      path: string;
+      sourcePath: string;
+      embedLink: string;
+    }
+  | { id: string; status: "unsaved"; filename: string; error: string };
 
 export type ChatRole = "user" | "assistant";
 

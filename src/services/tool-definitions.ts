@@ -62,6 +62,24 @@ function localTool(
   };
 }
 
+export const GENERATE_IMAGE_TOOL = localTool(
+  "generate_image",
+  "Generate one PNG with the configured image model and save it to the vault attachment folder. This may incur charges. Use only for a user's request to generate an image, not for ordinary text answers. Returns a saved path and embed link, not image bytes. Does not edit notes. If generation succeeds but saving fails, do not generate again: the user can retry saving.",
+  {
+    prompt: { type: "string", minLength: 1, maxLength: 32000 },
+    filename: {
+      type: ["string", "null"],
+      description:
+        "Optional plain filename ending in .png; no directory path. Null uses a unique name.",
+    },
+    sourcePath: {
+      type: ["string", "null"],
+      description:
+        "Existing Markdown note for relative attachment location and embed links. Does not edit the note. Null uses the captured note context, if available.",
+    },
+  },
+);
+
 export const READ_ONLY_TOOLS: ToolDefinition[] = [
   localTool(
     "get_backlinks",

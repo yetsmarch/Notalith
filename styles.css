@@ -70,6 +70,41 @@
   max-width: 100%;
 }
 
+.notalith-generated-images {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-4-2);
+  margin-top: var(--size-4-2);
+}
+
+.notalith-generated-image {
+  padding: var(--size-4-2);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+}
+
+.notalith-generated-image img {
+  display: block;
+  max-width: 100%;
+  max-height: 480px;
+  margin-top: var(--size-4-2);
+  border-radius: var(--radius-s);
+  object-fit: contain;
+}
+
+.notalith-generated-image-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--size-4-2);
+}
+
+.notalith-generated-image-path {
+  margin-top: var(--size-4-2);
+  overflow-wrap: anywhere;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+
 .notalith-message-body > :first-child {
   margin-top: 0;
 }

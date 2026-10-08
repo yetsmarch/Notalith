@@ -4,6 +4,8 @@ import { defaultConnections } from "./provider-settings";
 import { LocalAgentRuntime, type RuntimeHandlers } from "./agent-runtime";
 import type { NotalithSettings, ProviderInput, ToolCall } from "../types";
 import type { VaultService } from "./vault-service";
+import { DEFAULT_IMAGE_SETTINGS } from "./image-settings";
+import { ImageGenerationService } from "./image-generation";
 
 const settings: NotalithSettings = {
   connections: defaultConnections(),
@@ -14,9 +16,164 @@ const settings: NotalithSettings = {
   maxNoteCharacters: 1000,
   maxToolRounds: 2,
   attachmentFolder: "",
+  imageGeneration: { ...DEFAULT_IMAGE_SETTINGS },
 };
 
 describe("local agent runtime", () => {
+  it.each([false, true])(
+    "advertises generate_image only when the independent service is configured (%s)",
+    async (configured) => {
+      const vault = {} as VaultService;
+      const images = new ImageGenerationService({
+        validateAttachmentDestination: vi.fn(),
+        importAttachment: vi.fn(),
+      });
+      if (configured) images.configure({ generate: vi.fn() }, "");
+      const provider: ModelProvider = {
+        supportsImages: false,
+        supportsImageToolResults: false,
+        resetConversation: vi.fn(),
+        finishTurn: vi.fn(),
+        abortTurn: vi.fn(),
+        testConnection: vi.fn(),
+        respond: vi.fn<ModelProvider["respond"]>(async (_input, tools) => {
+          expect(tools.some((tool) => tool.name === "generate_image")).toBe(
+            configured,
+          );
+          return { toolCalls: [] };
+        }),
+      };
+      await new LocalAgentRuntime(settings, vault, provider, images).send(
+        "Hello",
+        [],
+        { onTextDelta: vi.fn(), onToolActivity: vi.fn(), onUsage: vi.fn() },
+        new AbortController().signal,
+      );
+    },
+  );
+
+  it("dispatches image generation for a non-vision chat provider and returns saved metadata", async () => {
+    const artifact = {
+      id: "image-1",
+      status: "saved" as const,
+      path: "Attachments/image.png",
+      sourcePath: "Notes/current.md",
+      embedLink: "![[Attachments/image.png]]",
+    };
+    const generate = vi
+      .fn<ImageGenerationService["generate"]>()
+      .mockResolvedValue(artifact);
+    const images = new ImageGenerationService({
+      validateAttachmentDestination: vi.fn(),
+      importAttachment: vi.fn(),
+    });
+    images.configure({ generate: vi.fn() }, "");
+    vi.spyOn(images, "generate").mockImplementation(generate);
+    const onGeneratedImage = vi.fn();
+    const provider: ModelProvider = {
+      supportsImages: false,
+      supportsImageToolResults: false,
+      resetConversation: vi.fn(),
+      finishTurn: vi.fn(),
+      abortTurn: vi.fn(),
+      testConnection: vi.fn(),
+      respond: vi.fn<ModelProvider["respond"]>(
+        async (input, tools, handlers) => {
+          expect(tools.some((tool) => tool.name === "generate_image")).toBe(
+            true,
+          );
+          if (input.kind === "message")
+            handlers.onToolCall({
+              callId: "image-call",
+              name: "generate_image",
+              arguments:
+                '{"prompt":"Blue sky","filename":null,"sourcePath":null}',
+            });
+          else
+            expect(input.results).toEqual([
+              {
+                callId: "image-call",
+                output: JSON.stringify({ images: [artifact] }),
+              },
+            ]);
+          return { toolCalls: [] };
+        },
+      ),
+    };
+    const signal = new AbortController().signal;
+    await new LocalAgentRuntime(
+      settings,
+      {} as VaultService,
+      provider,
+      images,
+    ).send(
+      "Generate an image",
+      [],
+      {
+        onTextDelta: vi.fn(),
+        onToolActivity: vi.fn(),
+        onUsage: vi.fn(),
+        onGeneratedImage,
+      },
+      signal,
+      "Notes/current.md",
+    );
+    expect(generate).toHaveBeenCalledWith(
+      "Blue sky",
+      null,
+      "Notes/current.md",
+      signal,
+    );
+    expect(onGeneratedImage).toHaveBeenCalledWith(artifact);
+  });
+
+  it("does not let the model automatically retry a billed image failure in the same turn", async () => {
+    const images = new ImageGenerationService({
+      validateAttachmentDestination: vi.fn(),
+      importAttachment: vi.fn(),
+    });
+    images.configure({ generate: vi.fn() }, "");
+    const generate = vi
+      .spyOn(images, "generate")
+      .mockRejectedValue(new Error("Image request timed out"));
+    let round = 0;
+    const provider: ModelProvider = {
+      supportsImages: false,
+      supportsImageToolResults: false,
+      resetConversation: vi.fn(),
+      finishTurn: vi.fn(),
+      abortTurn: vi.fn(),
+      testConnection: vi.fn(),
+      respond: vi.fn<ModelProvider["respond"]>(
+        async (input, _tools, handlers) => {
+          if (round++ < 2)
+            handlers.onToolCall({
+              callId: `call-${round}`,
+              name: "generate_image",
+              arguments: '{"prompt":"Sky","filename":null,"sourcePath":null}',
+            });
+          else if (input.kind === "tool-results")
+            expect(input.results[0].output).toContain(
+              "Do not retry automatically",
+            );
+          return { toolCalls: [] };
+        },
+      ),
+    };
+    await new LocalAgentRuntime(
+      settings,
+      {} as VaultService,
+      provider,
+      images,
+    ).send(
+      "Generate an image",
+      [],
+      { onTextDelta: vi.fn(), onToolActivity: vi.fn(), onUsage: vi.fn() },
+      new AbortController().signal,
+    );
+    expect(generate).toHaveBeenCalledTimes(1);
+  });
+
   it("advertises and dispatches every P0 tool with pagination and range arguments", async () => {
     const listEntries = vi.fn(() => ({ items: [], nextOffset: null }));
     const readTextFile = vi.fn(async () => ({

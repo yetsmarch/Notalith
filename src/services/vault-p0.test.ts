@@ -651,6 +651,36 @@ describe("local knowledge, filtered search and attachment imports", () => {
     ).toThrow("Unsafe");
   });
 
+  it("does not create image attachments after cancellation", async () => {
+    const f = fixture();
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      f.service.importAttachment(
+        "image.png",
+        new ArrayBuffer(0),
+        "",
+        "",
+        controller.signal,
+      ),
+    ).rejects.toThrow("cancelled");
+    expect(f.createBinary).not.toHaveBeenCalled();
+    const after = new AbortController();
+    f.getAvailablePathForAttachment.mockImplementationOnce(async () => {
+      after.abort();
+      return "image.png";
+    });
+    await expect(
+      f.service.importAttachment(
+        "image.png",
+        new ArrayBuffer(0),
+        "",
+        "",
+        after.signal,
+      ),
+    ).rejects.toThrow("cancelled");
+    expect(f.createBinary).not.toHaveBeenCalled();
+  });
   it("rejects unsafe names, oversized files, protected destinations and file/folder collisions", async () => {
     const f = fixture();
     for (const name of [

@@ -8,12 +8,18 @@ import {
   WorkspaceLeaf,
   setIcon,
 } from "obsidian";
-import type { ChatMessage, ContextAttachment, ProviderUsage } from "../types";
+import type {
+  ChatMessage,
+  ContextAttachment,
+  GeneratedImageArtifact,
+  ProviderUsage,
+} from "../types";
 import type NotalithPlugin from "../main";
 import { PROVIDER_IDS, PROVIDER_NAMES } from "../services/provider-settings";
 import { createId } from "../services/id-utils";
 import { imageMimeType, isTextExtension } from "../services/path-utils";
 import { isOfficeExtension } from "../services/office-document-service";
+import { ImageSaveError } from "../services/image-generation";
 import {
   MAX_ATTACHMENT_BYTES,
   MAX_IMAGE_BYTES,
@@ -32,6 +38,7 @@ interface UiChatMessage extends ChatMessage {
   attachments?: ContextAttachment[];
   toolActivities?: ToolActivity[];
   error?: string;
+  generatedImages?: GeneratedImageArtifact[];
 }
 
 class VaultFileSuggestModal extends FuzzySuggestModal<TFile> {
@@ -214,6 +221,25 @@ export class NotalithChatView extends ItemView {
       "notalith-send",
     );
     this.renderAttachments();
+    const pending = this.plugin.imageService?.pendingArtifact;
+    if (pending) {
+      const message: UiChatMessage = {
+        id: createId(),
+        role: "assistant",
+        text: "A generated image is waiting to be saved.",
+        createdAt: Date.now(),
+        generatedImages: [pending],
+      };
+      this.messages.push(message);
+      void this.renderMessage(message).then(() => {
+        const el =
+          this.messageList?.querySelector<HTMLElement>(
+            `[data-message-id="${message.id}"]`,
+          ) ?? null;
+        this.renderGeneratedImages(el, message);
+        void this.renderAssistantBody(el, message);
+      });
+    }
   }
 
   private renderModelSelect(parent: HTMLElement): void {
@@ -302,6 +328,8 @@ export class NotalithChatView extends ItemView {
     const prompt = this.textarea?.value.trim() ?? "";
     if (!prompt || this.abortController) return;
     const runtime = this.plugin.runtime;
+    const active = this.app.workspace.getActiveFile();
+    const sourcePath = active?.extension === "md" ? active.path : "";
     if (!this.plugin.isConfigured() || !runtime) {
       new Notice(
         "Configure a model, endpoint, and API key in Notalith settings.",
@@ -322,6 +350,7 @@ export class NotalithChatView extends ItemView {
       text: "",
       createdAt: Date.now(),
       toolActivities: [],
+      generatedImages: [],
     };
     this.messages.push(userMessage, assistantMessage);
     this.attachments = [];
@@ -356,8 +385,13 @@ export class NotalithChatView extends ItemView {
             this.renderToolActivities(assistantEl, assistantMessage);
           },
           onUsage: (usage) => this.renderUsage(assistantEl, usage),
+          onGeneratedImage: (artifact) => {
+            assistantMessage.generatedImages?.push(artifact);
+            this.renderGeneratedImages(assistantEl, assistantMessage);
+          },
         },
         this.abortController.signal,
+        sourcePath,
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -453,6 +487,165 @@ export class NotalithChatView extends ItemView {
     let el = messageEl.querySelector<HTMLElement>(".notalith-usage");
     if (!el) el = messageEl.createDiv({ cls: "notalith-usage" });
     el.setText(`${usage.totalTokens.toLocaleString()} tokens`);
+  }
+
+  updateGeneratedImage(artifact: GeneratedImageArtifact): void {
+    for (const message of this.messages) {
+      const index =
+        message.generatedImages?.findIndex(
+          (image) => image.id === artifact.id,
+        ) ?? -1;
+      if (index < 0 || !message.generatedImages) continue;
+      message.generatedImages[index] = artifact;
+      const el =
+        this.messageList?.querySelector<HTMLElement>(
+          `[data-message-id="${message.id}"]`,
+        ) ?? null;
+      this.renderGeneratedImages(el, message);
+    }
+  }
+
+  removeGeneratedImage(id: string): void {
+    for (const message of this.messages) {
+      if (!message.generatedImages?.some((image) => image.id === id)) continue;
+      message.generatedImages = message.generatedImages.filter(
+        (image) => image.id !== id,
+      );
+      const el =
+        this.messageList?.querySelector<HTMLElement>(
+          `[data-message-id="${message.id}"]`,
+        ) ?? null;
+      this.renderGeneratedImages(el, message);
+    }
+  }
+
+  private renderGeneratedImages(
+    messageEl: HTMLElement | null,
+    message: UiChatMessage,
+  ): void {
+    if (!messageEl) return;
+    let section = messageEl.querySelector<HTMLElement>(
+      ".notalith-generated-images",
+    );
+    if (!section)
+      section = messageEl.createDiv({ cls: "notalith-generated-images" });
+    section.empty();
+    for (const artifact of message.generatedImages ?? []) {
+      const card = section.createDiv({ cls: "notalith-generated-image" });
+      const actions = card.createDiv({
+        cls: "notalith-generated-image-actions",
+      });
+      try {
+        const file =
+          artifact.status === "saved"
+            ? this.app.vault.getAbstractFileByPath(artifact.path)
+            : null;
+        if (artifact.status === "saved" && !(file instanceof TFile)) {
+          throw new Error(`Generated image no longer exists: ${artifact.path}`);
+        }
+        const src =
+          file instanceof TFile
+            ? this.app.vault.getResourcePath(file)
+            : this.plugin.imageService.pendingPreview(artifact.id);
+        card.createEl("img", { attr: { src, alt: "Generated image" } });
+        if (artifact.status === "saved") {
+          card.createDiv({
+            cls: "notalith-generated-image-path",
+            text: artifact.path,
+          });
+          this.imageAction(actions, "Copy embed link", async () => {
+            const { link } = this.plugin.vaultService.generateAttachmentLink(
+              artifact.path,
+              artifact.sourcePath,
+              true,
+            );
+            await navigator.clipboard.writeText(link);
+            new Notice("Image embed link copied.");
+          });
+          this.imageAction(actions, "Insert into note", async () => {
+            new VaultFileSuggestModal(
+              this.app.vault.getMarkdownFiles(),
+              (note) => {
+                void (async () => {
+                  try {
+                    const { link } =
+                      this.plugin.vaultService.generateAttachmentLink(
+                        artifact.path,
+                        note.path,
+                        true,
+                      );
+                    await this.plugin.vaultService.appendMarkdownNote(
+                      note.path,
+                      link,
+                      new AbortController().signal,
+                    );
+                    new Notice(`Image appended to ${note.path}`);
+                  } catch (error) {
+                    console.error("[Notalith] Image insertion failed", error);
+                    new Notice(
+                      error instanceof Error ? error.message : String(error),
+                    );
+                  }
+                })();
+              },
+              this.plugin,
+            ).open();
+          });
+        } else {
+          card.createDiv({
+            cls: "notalith-error",
+            text: `Generated but not saved: ${artifact.error}. The image is retained only in memory.`,
+          });
+          this.imageAction(actions, "Retry save", async () => {
+            try {
+              const saved = await this.plugin.imageService.retrySave(
+                artifact.id,
+                new AbortController().signal,
+              );
+              this.plugin.refreshGeneratedImage(saved);
+            } catch (error) {
+              if (error instanceof ImageSaveError)
+                this.plugin.refreshGeneratedImage(error.artifact);
+              throw error;
+            }
+          });
+          this.imageAction(actions, "Discard", async () => {
+            this.plugin.imageService.discard(artifact.id);
+            this.plugin.removeGeneratedImage(artifact.id);
+          });
+        }
+      } catch (error) {
+        card.createDiv({
+          cls: "notalith-error",
+          text: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    this.scrollToBottom();
+  }
+
+  private imageAction(
+    parent: HTMLElement,
+    label: string,
+    action: () => Promise<void>,
+  ): void {
+    const button = parent.createEl("button", {
+      text: label,
+      attr: { type: "button" },
+    });
+    button.addEventListener("click", () => {
+      void (async () => {
+        button.disabled = true;
+        try {
+          await action();
+        } catch (error) {
+          console.error("[Notalith] Generated image action failed", error);
+          new Notice(error instanceof Error ? error.message : String(error));
+        } finally {
+          button.disabled = false;
+        }
+      })();
+    });
   }
 
   private renderError(messageEl: HTMLElement | null, message: string): void {

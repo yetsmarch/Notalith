@@ -1,9 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { MARKDOWN_WRITE_TOOLS, READ_ONLY_TOOLS } from "./tool-definitions";
+import {
+  GENERATE_IMAGE_TOOL,
+  MARKDOWN_WRITE_TOOLS,
+  READ_ONLY_TOOLS,
+} from "./tool-definitions";
 
 describe("strict tool definitions", () => {
   it("requires every declared property", () => {
-    for (const tool of [...READ_ONLY_TOOLS, ...MARKDOWN_WRITE_TOOLS]) {
+    for (const tool of [
+      ...READ_ONLY_TOOLS,
+      ...MARKDOWN_WRITE_TOOLS,
+      GENERATE_IMAGE_TOOL,
+    ]) {
       const properties = tool.parameters.properties as Record<string, unknown>;
       const required = tool.parameters.required as string[];
 

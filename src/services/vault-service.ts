@@ -480,15 +480,17 @@ export class VaultService {
     data: ArrayBuffer,
     folder = "",
     sourcePath = "",
+    signal = new AbortController().signal,
   ) {
+    this.requireNotCancelled(signal);
     validateAttachmentName(name);
     if (data.byteLength > MAX_ATTACHMENT_BYTES)
       throw new Error("Attachment exceeds 25 MB.");
-    if (sourcePath) this.requireMarkdownFile(sourcePath);
+    this.validateAttachmentDestination(folder, sourcePath);
     let path: string;
     if (folder) {
       const normalized = validateVaultPath(folder, this.app.vault.configDir);
-      await this.createFolder(normalized, new AbortController().signal);
+      await this.createFolder(normalized, signal);
       const dot = name.lastIndexOf(".");
       const stem = dot > 0 ? name.slice(0, dot) : name;
       const extension = dot > 0 ? name.slice(dot) : "";
@@ -506,14 +508,20 @@ export class VaultService {
       );
       const parent = path.split("/").slice(0, -1).join("/");
       validateVaultPath(path, this.app.vault.configDir);
-      if (parent) await this.createFolder(parent, new AbortController().signal);
+      if (parent) await this.createFolder(parent, signal);
     }
     validateVaultPath(path, this.app.vault.configDir);
+    this.requireNotCancelled(signal);
     const file = await this.app.vault.createBinary(path, data);
     return {
       file,
       link: this.app.fileManager.generateMarkdownLink(file, sourcePath),
     };
+  }
+
+  validateAttachmentDestination(folder: string, sourcePath: string): void {
+    if (folder) validateVaultPath(folder, this.app.vault.configDir);
+    if (sourcePath) this.requireMarkdownFile(sourcePath);
   }
 
   generateAttachmentLink(path: string, sourcePath = "", embed = false) {
