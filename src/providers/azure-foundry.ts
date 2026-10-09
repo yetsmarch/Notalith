@@ -12,7 +12,8 @@ import type {
   ToolDefinition,
 } from "../types";
 import { NotalithError } from "../types";
-import type { ModelProvider } from "./provider";
+import type { ModelProvider, ProviderRequestOptions } from "./provider";
+import { ConversationHistory } from "../services/context-history";
 
 type ResponseInput = Array<Record<string, unknown>> | string;
 
@@ -24,6 +25,7 @@ interface ResponseRequest {
   previous_response_id?: string;
   tools?: ToolDefinition[];
   tool_choice?: "auto";
+  max_output_tokens?: number;
 }
 
 interface ResponseObject {
@@ -43,6 +45,7 @@ interface ResponseObject {
 
 interface AzureResponseResult extends ProviderResult {
   responseId: string;
+  output: Array<Record<string, unknown>>;
 }
 
 export class AzureFoundryProvider implements ModelProvider {
@@ -51,6 +54,15 @@ export class AzureFoundryProvider implements ModelProvider {
   private previousResponseId: string | undefined;
   private turnStartResponseId: string | undefined;
   private turnInProgress = false;
+  readonly context = new ConversationHistory<Record<string, unknown>>(
+    (text) => [
+      { role: "user", content: [{ type: "input_text", text }] },
+      {
+        role: "assistant",
+        content: [{ type: "output_text", text: "Historical context noted." }],
+      },
+    ],
+  );
 
   constructor(
     private readonly connection: ProviderConnection,
@@ -62,15 +74,32 @@ export class AzureFoundryProvider implements ModelProvider {
   resetConversation(): void {
     this.previousResponseId = undefined;
     this.turnInProgress = false;
+    this.context.reset();
   }
 
   finishTurn(): void {
     this.turnInProgress = false;
+    this.context.finishTurn();
   }
 
   abortTurn(): void {
     if (this.turnInProgress) this.previousResponseId = this.turnStartResponseId;
     this.turnInProgress = false;
+    this.context.abortTurn();
+  }
+
+  createSummaryProvider(systemPrompt: string): ModelProvider {
+    return new AzureFoundryProvider(
+      this.connection,
+      this.model,
+      systemPrompt,
+      this.getApiKey,
+    );
+  }
+
+  onContextReplaced(): void {
+    this.previousResponseId = undefined;
+    this.turnStartResponseId = undefined;
   }
 
   async testConnection(): Promise<ConnectionTestResult> {
@@ -111,25 +140,33 @@ export class AzureFoundryProvider implements ModelProvider {
     tools: ToolDefinition[],
     handlers: ProviderHandlers,
     signal: AbortSignal,
+    options?: ProviderRequestOptions,
   ): Promise<ProviderResult> {
     this.validateConfiguration();
     if (signal.aborted) throw this.cancelledError();
     if (input.kind === "message") {
       this.turnStartResponseId = this.previousResponseId;
       this.turnInProgress = true;
+      this.context.beginTurn();
     }
 
+    const incoming =
+      input.kind === "message"
+        ? this.toUserInput(input.message)
+        : input.results.map((result) => ({
+            type: "function_call_output",
+            call_id: result.callId,
+            output: result.output,
+          }));
     const request: ResponseRequest = {
       model: this.model.modelId,
-      instructions: this.previousResponseId ? undefined : this.systemPrompt,
-      input:
-        input.kind === "message"
-          ? this.toUserInput(input.message)
-          : input.results.map((result) => ({
-              type: "function_call_output",
-              call_id: result.callId,
-              output: result.output,
-            })),
+      instructions: this.systemPrompt,
+      input: this.previousResponseId
+        ? incoming
+        : [...this.context.items, ...incoming],
+      ...(options?.maxOutputTokens
+        ? { max_output_tokens: options.maxOutputTokens }
+        : {}),
       stream: true,
       previous_response_id: this.previousResponseId,
       tools,
@@ -159,6 +196,7 @@ export class AzureFoundryProvider implements ModelProvider {
     }
     if (signal.aborted) throw this.cancelledError();
     this.previousResponseId = result.responseId;
+    this.context.append(...incoming, ...result.output);
     return { toolCalls: result.toolCalls, usage: result.usage };
   }
 
@@ -190,6 +228,8 @@ export class AzureFoundryProvider implements ModelProvider {
     let completed = false;
     let usage: ProviderUsage | undefined;
     const toolCalls: ToolCall[] = [];
+    let output: Array<Record<string, unknown>> = [];
+    let text = "";
 
     const consume = (block: string): void => {
       for (const payload of this.ssePayloads(block)) {
@@ -199,9 +239,12 @@ export class AzureFoundryProvider implements ModelProvider {
 
         if (eventType === "response.output_text.delta") {
           if (typeof event.delta === "string") {
+            text += event.delta;
             handlers.onTextDelta(event.delta);
           }
         } else if (eventType === "response.output_item.done") {
+          const item = this.asRecord(event.item);
+          if (item) output.push(item);
           const call = this.parseToolCall(event.item);
           if (call) {
             toolCalls.push(call);
@@ -213,6 +256,15 @@ export class AzureFoundryProvider implements ModelProvider {
         ) {
           if (eventType === "response.completed") completed = true;
           const parsedResponse = this.asRecord(event.response);
+          if (
+            eventType === "response.completed" &&
+            Array.isArray(parsedResponse?.output) &&
+            parsedResponse.output.length
+          )
+            output = parsedResponse.output.filter(
+              (item): item is Record<string, unknown> =>
+                this.asRecord(item) !== null,
+            );
           if (typeof parsedResponse?.id === "string") {
             responseId = parsedResponse.id;
           }
@@ -259,7 +311,11 @@ export class AzureFoundryProvider implements ModelProvider {
       );
     }
 
-    return { responseId, toolCalls, usage };
+    if (!output.length && text)
+      output = [
+        { role: "assistant", content: [{ type: "output_text", text }] },
+      ];
+    return { responseId, toolCalls, usage, output };
   }
 
   private async completeResponse(
@@ -307,7 +363,12 @@ export class AzureFoundryProvider implements ModelProvider {
       );
     }
 
-    return { responseId: parsed.id, toolCalls, usage };
+    const output = parsed.output?.length
+      ? parsed.output
+      : text
+        ? [{ role: "assistant", content: [{ type: "output_text", text }] }]
+        : [];
+    return { responseId: parsed.id, toolCalls, usage, output };
   }
 
   private toUserInput(input: ModelTurnInput): Array<Record<string, unknown>> {

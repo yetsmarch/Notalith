@@ -236,6 +236,50 @@ API keys are stored in Obsidian `SecretStorage`; they are not written to plugin 
 
 ## Usage
 
+### Automatic context compression
+
+The plugin automatically checks estimated input tokens before every model
+request, including requests that follow a tool-result batch. Under
+**Settings → Notalith → Context**, the **Context input token budget** defaults
+to 32,000. Set it below your deployment's context window, leaving room for
+output/reasoning tokens. The plugin does not infer a model's window from its
+deployment name.
+
+When the budget is exceeded, the selected chat model produces one bounded
+rolling text summary in an isolated request with no tools. Each update uses
+the previous summary plus only newly archived, completed interactions, not the
+entire original transcript. Recent interactions stay verbatim where they fit
+the retention budget; unfinished tool-call/result sequences are never split.
+The summary preserves goals, constraints, decisions, unfinished work and
+relevant paths. Image pixels and private reasoning are not sent to the
+summarizer, so old visual details are not guaranteed to survive compression.
+
+The replacement targets roughly 60% of the input budget, with up to 8,000
+estimated tokens of recent interactions and a summary capped at 2,000 tokens.
+System instructions, tools, new input and a safety allowance count toward the
+budget. Estimates account separately for non-ASCII text and image allowances
+and are calibrated conservatively with available provider input usage; they
+are not exact tokenizer counts or a guarantee against provider limits.
+
+Compression updates model context without clearing the visible chat. Azure
+Responses starts a fresh response chain with the summary and retained items;
+this does not use a server-side compaction API. Other providers replace their
+local request history. The chat reports estimated before/after input size and
+summary-call usage when returned by the provider.
+
+Summarization incurs an additional model call and can lose detail. It reduces
+repeated historical input in subsequent turns, not necessarily the total cost
+of a short conversation. Empty/oversized summaries, insufficient reduction,
+cancellation and concurrent resets never install a partial summary. An error
+stops the pending request instead of silently exceeding the budget or
+discarding history. If a single current input or unfinished interaction is
+too large, reduce its size or raise the budget; compression does not truncate
+it. Completed vault actions are not undone on failure.
+
+Conversation context and summaries remain in memory only and reset with a
+new chat, model change or plugin reload. No manual compression action or
+session persistence is required.
+
 ### Image generation tool
 
 Under **Settings → Notalith → Image generation**, select an Azure Foundry or

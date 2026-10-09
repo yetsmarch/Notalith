@@ -13,6 +13,10 @@ import { validateVaultPath } from "./services/path-utils";
 import { DEFAULT_IMAGE_SETTINGS } from "./services/image-settings";
 import { ImageSaveError } from "./services/image-generation";
 import {
+  DEFAULT_CONTEXT_INPUT_BUDGET,
+  normalizeContextInputBudget,
+} from "./services/context-compaction";
+import {
   defaultConnections,
   AZURE_PROTOCOLS,
   isAzureProtocol,
@@ -40,6 +44,7 @@ export const DEFAULT_SETTINGS: NotalithSettings = {
   includeEmbeddedImages: true,
   maxNoteCharacters: 30_000,
   maxToolRounds: 6,
+  contextInputBudget: DEFAULT_CONTEXT_INPUT_BUDGET,
   attachmentFolder: "",
   imageGeneration: { ...DEFAULT_IMAGE_SETTINGS },
 };
@@ -91,6 +96,33 @@ export class NotalithSettingTab extends PluginSettingTab {
     this.renderImageGeneration(containerEl);
 
     new Setting(containerEl).setName("Context").setHeading();
+
+    new Setting(containerEl)
+      .setName("Context input token budget")
+      .setDesc(
+        "Automatically summarize older interactions before a request exceeds this estimated input budget. Summaries use the selected model and can incur charges. Leave room in your model's context window for its reply.",
+      )
+      .addText((text) => {
+        text.setValue(String(this.plugin.settings.contextInputBudget));
+        text.inputEl.type = "number";
+        text.inputEl.addEventListener("change", () => {
+          void (async () => {
+            const previous = this.plugin.settings.contextInputBudget;
+            try {
+              this.plugin.settings.contextInputBudget =
+                normalizeContextInputBudget(Number(text.getValue()));
+              await this.plugin.saveSettings();
+            } catch (error) {
+              this.plugin.settings.contextInputBudget = previous;
+              text.setValue(String(previous));
+              console.error("[Notalith] Failed to save context budget", error);
+              new Notice(
+                error instanceof Error ? error.message : String(error),
+              );
+            }
+          })();
+        });
+      });
 
     new Setting(containerEl)
       .setName("Imported attachment folder")

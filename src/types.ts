@@ -40,6 +40,7 @@ export interface NotalithSettings {
   includeEmbeddedImages: boolean;
   maxNoteCharacters: number;
   maxToolRounds: number;
+  contextInputBudget: number;
   attachmentFolder: string;
   imageGeneration: ImageGenerationSettings;
 }

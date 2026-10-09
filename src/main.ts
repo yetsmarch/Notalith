@@ -7,6 +7,7 @@ import { GeminiProvider } from "./providers/gemini";
 import { OpenAIImageProvider } from "./providers/image-provider";
 import { ImageGenerationService } from "./services/image-generation";
 import { normalizeImageSettings } from "./services/image-settings";
+import { normalizeContextInputBudget } from "./services/context-compaction";
 import type { ModelProvider } from "./providers/provider";
 import { LocalAgentRuntime } from "./services/agent-runtime";
 import {
@@ -112,6 +113,9 @@ export default class NotalithPlugin extends Plugin {
           ? settings.attachmentFolder
           : DEFAULT_SETTINGS.attachmentFolder,
       imageGeneration: normalizeImageSettings(stored?.imageGeneration),
+      contextInputBudget: normalizeContextInputBudget(
+        stored?.contextInputBudget,
+      ),
       ...normalizeProviderSettings(stored),
     };
     if (this.settings.systemPrompt === LEGACY_SYSTEM_PROMPT) {

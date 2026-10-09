@@ -13,7 +13,8 @@ import type {
   ToolOutput,
 } from "../types";
 import { NotalithError } from "../types";
-import type { ModelProvider } from "./provider";
+import type { ModelProvider, ProviderRequestOptions } from "./provider";
+import { ConversationHistory } from "../services/context-history";
 
 type TextBlock = { type: "text"; text: string };
 type ThinkingBlock = { type: "thinking"; thinking: string; signature: string };
@@ -71,8 +72,14 @@ const IMAGE_TYPES = new Set([
 ]);
 
 export class AnthropicProvider implements ModelProvider {
-  private history: Message[] = [];
-  private turnStart: number | null = null;
+  readonly context = new ConversationHistory<Message>((text) => [
+    { role: "user", content: text },
+    { role: "assistant", content: "Historical context noted." },
+  ]);
+
+  private get history(): Message[] {
+    return this.context.items;
+  }
 
   constructor(
     private readonly connection: ProviderConnection,
@@ -91,17 +98,25 @@ export class AnthropicProvider implements ModelProvider {
   }
 
   resetConversation(): void {
-    this.history = [];
-    this.turnStart = null;
+    this.context.reset();
   }
 
   finishTurn(): void {
-    this.turnStart = null;
+    this.context.finishTurn();
   }
 
   abortTurn(): void {
-    if (this.turnStart !== null) this.history.length = this.turnStart;
-    this.turnStart = null;
+    this.context.abortTurn();
+  }
+
+  createSummaryProvider(systemPrompt: string): ModelProvider {
+    return new AnthropicProvider(
+      this.connection,
+      this.model,
+      systemPrompt,
+      this.getApiKey,
+      this.options,
+    );
   }
 
   async testConnection(): Promise<ConnectionTestResult> {
@@ -136,14 +151,15 @@ export class AnthropicProvider implements ModelProvider {
     tools: ToolDefinition[],
     handlers: ProviderHandlers,
     signal: AbortSignal,
+    options?: ProviderRequestOptions,
   ): Promise<ProviderResult> {
     this.validateConfiguration();
     if (signal.aborted) throw this.cancelledError();
     const incoming = this.toMessages(input);
-    if (input.kind === "message") this.turnStart = this.history.length;
+    if (input.kind === "message") this.context.beginTurn();
     const request = {
       model: this.model.modelId,
-      max_tokens: MAX_TOKENS,
+      max_tokens: options?.maxOutputTokens ?? MAX_TOKENS,
       ...(this.systemPrompt ? { system: this.systemPrompt } : {}),
       messages: [...this.history, ...incoming],
       ...(tools.length
@@ -197,7 +213,7 @@ export class AnthropicProvider implements ModelProvider {
       }
     }
     if (signal.aborted) throw this.cancelledError();
-    this.history.push(...incoming, completion.message);
+    this.context.append(...incoming, completion.message);
     return { toolCalls: completion.toolCalls, usage: completion.usage };
   }
 
@@ -696,7 +712,13 @@ export class AnthropicProvider implements ModelProvider {
     if (!raw) return previous;
     const inputTokens =
       typeof raw.input_tokens === "number"
-        ? raw.input_tokens
+        ? raw.input_tokens +
+          (typeof raw.cache_read_input_tokens === "number"
+            ? raw.cache_read_input_tokens
+            : 0) +
+          (typeof raw.cache_creation_input_tokens === "number"
+            ? raw.cache_creation_input_tokens
+            : 0)
         : previous?.inputTokens;
     const outputTokens =
       typeof raw.output_tokens === "number"

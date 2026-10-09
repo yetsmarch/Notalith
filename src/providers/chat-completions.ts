@@ -12,7 +12,8 @@ import type {
   ToolDefinition,
 } from "../types";
 import { NotalithError } from "../types";
-import type { ModelProvider } from "./provider";
+import type { ModelProvider, ProviderRequestOptions } from "./provider";
+import { ConversationHistory } from "../services/context-history";
 
 interface ChatToolCall {
   id: string;
@@ -50,8 +51,14 @@ export interface ChatProviderOptions {
 
 export class ChatCompletionsProvider implements ModelProvider {
   readonly supportsImageToolResults = false;
-  private history: ChatMessage[] = [];
-  private turnStart: number | null = null;
+  readonly context = new ConversationHistory<ChatMessage>((text) => [
+    { role: "user", content: text },
+    { role: "assistant", content: "Historical context noted." },
+  ]);
+
+  private get history(): ChatMessage[] {
+    return this.context.items;
+  }
 
   constructor(
     private readonly connection: ProviderConnection,
@@ -66,17 +73,25 @@ export class ChatCompletionsProvider implements ModelProvider {
   }
 
   resetConversation(): void {
-    this.history = [];
-    this.turnStart = null;
+    this.context.reset();
   }
 
   finishTurn(): void {
-    this.turnStart = null;
+    this.context.finishTurn();
   }
 
   abortTurn(): void {
-    if (this.turnStart !== null) this.history.length = this.turnStart;
-    this.turnStart = null;
+    this.context.abortTurn();
+  }
+
+  createSummaryProvider(systemPrompt: string): ModelProvider {
+    return new ChatCompletionsProvider(
+      this.connection,
+      this.model,
+      systemPrompt,
+      this.getApiKey,
+      this.options,
+    );
   }
 
   async testConnection(): Promise<ConnectionTestResult> {
@@ -116,14 +131,22 @@ export class ChatCompletionsProvider implements ModelProvider {
     tools: ToolDefinition[],
     handlers: ProviderHandlers,
     signal: AbortSignal,
+    options?: ProviderRequestOptions,
   ): Promise<ProviderResult> {
     this.validateConfiguration();
     if (signal.aborted) throw this.cancelledError();
 
     const incoming = this.toMessages(input);
-    if (input.kind === "message") this.turnStart = this.history.length;
+    if (input.kind === "message") this.context.beginTurn();
     const request = {
       model: this.model.modelId,
+      ...(options?.maxOutputTokens
+        ? this.connection.id === "deepseek" ||
+          this.connection.id === "openrouter" ||
+          this.connection.id === "grok"
+          ? { max_tokens: options.maxOutputTokens }
+          : { max_completion_tokens: options.maxOutputTokens }
+        : {}),
       messages: [
         { role: "system", content: this.systemPrompt },
         ...this.history,
@@ -179,7 +202,7 @@ export class ChatCompletionsProvider implements ModelProvider {
     }
 
     if (signal.aborted) throw this.cancelledError();
-    this.history.push(...incoming, result.message);
+    this.context.append(...incoming, result.message);
     return { toolCalls: result.toolCalls, usage: result.usage };
   }
 

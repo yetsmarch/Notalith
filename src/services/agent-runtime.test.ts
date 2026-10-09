@@ -6,6 +6,22 @@ import type { NotalithSettings, ProviderInput, ToolCall } from "../types";
 import type { VaultService } from "./vault-service";
 import { DEFAULT_IMAGE_SETTINGS } from "./image-settings";
 import { ImageGenerationService } from "./image-generation";
+import {
+  ConversationHistory,
+  estimateContextTokens,
+  estimateTextTokens,
+} from "./context-history";
+import { DEFAULT_CONTEXT_INPUT_BUDGET } from "./context-compaction";
+import { MARKDOWN_WRITE_TOOLS, READ_ONLY_TOOLS } from "./tool-definitions";
+
+function contextMocks() {
+  return {
+    context: new ConversationHistory<unknown>((text) => [
+      { role: "user", content: text },
+    ]),
+    createSummaryProvider: vi.fn<ModelProvider["createSummaryProvider"]>(),
+  };
+}
 
 const settings: NotalithSettings = {
   connections: defaultConnections(),
@@ -15,11 +31,193 @@ const settings: NotalithSettings = {
   includeEmbeddedImages: false,
   maxNoteCharacters: 1000,
   maxToolRounds: 2,
+  contextInputBudget: DEFAULT_CONTEXT_INPUT_BUDGET,
   attachmentFolder: "",
   imageGeneration: { ...DEFAULT_IMAGE_SETTINGS },
 };
 
 describe("local agent runtime", () => {
+  it.each(["before-message", "after-tools"] as const)(
+    "automatically compresses %s and continues without exposing summary text as a chat answer",
+    async (when) => {
+      const context = contextMocks().context;
+      const tools = [
+        ...READ_ONLY_TOOLS.filter((tool) => tool.name !== "read_image"),
+        ...MARKDOWN_WRITE_TOOLS,
+      ];
+      const nextInput: ProviderInput = {
+        kind: "message",
+        message: { text: "Read the note", images: [] },
+      };
+      const fixed =
+        estimateTextTokens(settings.systemPrompt) +
+        estimateContextTokens(tools) +
+        estimateContextTokens(nextInput) +
+        1024;
+      const desiredHistory =
+        when === "before-message" ? 40_000 : 32_000 - fixed - 3000;
+      for (let i = 0; i < 6; i++) {
+        context.beginTurn();
+        context.append({
+          role: "user",
+          content:
+            `old-${i}` + "x".repeat(Math.floor((desiredHistory / 6 - 40) * 3)),
+        });
+        context.finishTurn();
+      }
+      const summaryRespond = vi.fn<ModelProvider["respond"]>(
+        async (_input, offeredTools, handlers) => {
+          expect(offeredTools).toEqual([]);
+          handlers.onTextDelta("Goal: read the note. Preserve its content.");
+          return {
+            toolCalls: [],
+            usage: { inputTokens: 20_000, outputTokens: 20 },
+          };
+        },
+      );
+      const summarizer = {
+        ...contextMocks(),
+        supportsImages: false,
+        supportsImageToolResults: false,
+        resetConversation: vi.fn(),
+        finishTurn: vi.fn(),
+        abortTurn: vi.fn(),
+        testConnection: vi.fn(),
+        respond: summaryRespond,
+      } satisfies ModelProvider;
+      const factory = vi.fn(() => summarizer);
+      const respond = vi.fn<ModelProvider["respond"]>(
+        async (incoming, _tools, handlers) => {
+          if (incoming.kind === "message") {
+            expect(factory).toHaveBeenCalledTimes(
+              when === "before-message" ? 1 : 0,
+            );
+            context.beginTurn();
+            context.append(incoming, {
+              role: "assistant",
+              tool_calls: [{ id: "read-call", name: "read_note" }],
+            });
+            const call = {
+              callId: "read-call",
+              name: "read_note",
+              arguments: '{"path":"Notes/a.md"}',
+            };
+            handlers.onToolCall(call);
+            return { toolCalls: [call] };
+          }
+          expect(factory).toHaveBeenCalledTimes(1);
+          expect(context.snapshot().summary).toContain("Preserve");
+          expect(incoming.results[0].callId).toBe("read-call");
+          context.append(incoming, { role: "assistant", content: "Finished" });
+          handlers.onTextDelta("Finished");
+          return {
+            toolCalls: [],
+            usage: { inputTokens: 12_000, outputTokens: 2 },
+          };
+        },
+      );
+      const provider = {
+        ...contextMocks(),
+        context,
+        createSummaryProvider: factory,
+        supportsImages: false,
+        supportsImageToolResults: false,
+        resetConversation: () => context.reset(),
+        finishTurn: () => context.finishTurn(),
+        abortTurn: () => context.abortTurn(),
+        testConnection: vi.fn(),
+        respond,
+      } satisfies ModelProvider;
+      const readNote = vi.fn<VaultService["readNote"]>(async () => ({
+        path: "Notes/a.md",
+        content: "n".repeat(20_000),
+        images: [],
+        truncated: false,
+      }));
+      const vault: Pick<VaultService, "readNote"> = { readNote };
+      const onTextDelta = vi.fn();
+      const onContextActivity =
+        vi.fn<NonNullable<RuntimeHandlers["onContextActivity"]>>();
+      const runtime = new LocalAgentRuntime(
+        settings,
+        vault as VaultService,
+        provider,
+      );
+      await runtime.send(
+        "Read the note",
+        [],
+        {
+          onTextDelta,
+          onToolActivity: vi.fn(),
+          onUsage: vi.fn(),
+          onContextActivity,
+        },
+        new AbortController().signal,
+      );
+      expect(summaryRespond).toHaveBeenCalledTimes(1);
+      expect(respond).toHaveBeenCalledTimes(2);
+      expect(readNote).toHaveBeenCalledTimes(1);
+      expect(onTextDelta.mock.calls).toEqual([["Finished"]]);
+      expect(
+        onContextActivity.mock.calls.map(([activity]) => activity.status),
+      ).toEqual(["running", "complete"]);
+      expect(context.snapshot().turns.every((turn) => turn.complete)).toBe(
+        true,
+      );
+      runtime.resetConversation();
+      expect(context.snapshot().summary).toBe("");
+    },
+  );
+
+  it("stops the pending request if automatic summarization fails and retains completed history", async () => {
+    const context = contextMocks().context;
+    context.beginTurn();
+    context.append({ role: "user", content: "x".repeat(120_000) });
+    context.finishTurn();
+    const before = context.snapshot();
+    const summaryRespond = vi
+      .fn<ModelProvider["respond"]>()
+      .mockRejectedValue(new Error("Summary failed"));
+    const summarizer = {
+      ...contextMocks(),
+      supportsImages: false,
+      supportsImageToolResults: false,
+      resetConversation: vi.fn(),
+      finishTurn: vi.fn(),
+      abortTurn: vi.fn(),
+      testConnection: vi.fn(),
+      respond: summaryRespond,
+    } satisfies ModelProvider;
+    const respond = vi.fn<ModelProvider["respond"]>();
+    const provider = {
+      ...summarizer,
+      context,
+      createSummaryProvider: vi.fn(() => summarizer),
+      abortTurn: () => context.abortTurn(),
+      respond,
+    } satisfies ModelProvider;
+    const runtime = new LocalAgentRuntime(
+      settings,
+      {} as VaultService,
+      provider,
+    );
+    await expect(
+      runtime.send(
+        "Continue",
+        [],
+        {
+          onTextDelta: vi.fn(),
+          onToolActivity: vi.fn(),
+          onUsage: vi.fn(),
+        },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow("Summary failed");
+    expect(respond).not.toHaveBeenCalled();
+    expect(context.snapshot().summary).toBe("");
+    expect(context.snapshot().turns).toEqual(before.turns);
+  });
+
   it.each([false, true])(
     "advertises generate_image only when the independent service is configured (%s)",
     async (configured) => {
@@ -30,6 +228,7 @@ describe("local agent runtime", () => {
       });
       if (configured) images.configure({ generate: vi.fn() }, "");
       const provider: ModelProvider = {
+        ...contextMocks(),
         supportsImages: false,
         supportsImageToolResults: false,
         resetConversation: vi.fn(),
@@ -71,6 +270,7 @@ describe("local agent runtime", () => {
     vi.spyOn(images, "generate").mockImplementation(generate);
     const onGeneratedImage = vi.fn();
     const provider: ModelProvider = {
+      ...contextMocks(),
       supportsImages: false,
       supportsImageToolResults: false,
       resetConversation: vi.fn(),
@@ -138,6 +338,7 @@ describe("local agent runtime", () => {
       .mockRejectedValue(new Error("Image request timed out"));
     let round = 0;
     const provider: ModelProvider = {
+      ...contextMocks(),
       supportsImages: false,
       supportsImageToolResults: false,
       resetConversation: vi.fn(),
@@ -216,6 +417,7 @@ describe("local agent runtime", () => {
       ["create_folder", { path: "Empty" }],
     ] as const;
     const provider: ModelProvider = {
+      ...contextMocks(),
       supportsImages: false,
       supportsImageToolResults: false,
       resetConversation: vi.fn(),
@@ -296,6 +498,7 @@ describe("local agent runtime", () => {
     ];
     const inputs: ProviderInput[] = [];
     const provider: ModelProvider = {
+      ...contextMocks(),
       supportsImages: false,
       supportsImageToolResults: false,
       resetConversation: vi.fn(),
@@ -378,6 +581,7 @@ describe("local agent runtime", () => {
     ];
     let results: ProviderInput | undefined;
     const provider: ModelProvider = {
+      ...contextMocks(),
       supportsImages: false,
       supportsImageToolResults: false,
       resetConversation: vi.fn(),
@@ -429,6 +633,7 @@ describe("local agent runtime", () => {
     });
     const appendMarkdownNote = vi.fn();
     const provider: ModelProvider = {
+      ...contextMocks(),
       supportsImages: false,
       supportsImageToolResults: false,
       resetConversation: vi.fn(),
@@ -476,6 +681,7 @@ describe("local agent runtime", () => {
       const abortTurn = vi.fn();
       const readImage = vi.fn();
       const provider: ModelProvider = {
+        ...contextMocks(),
         supportsImages,
         supportsImageToolResults,
         resetConversation: vi.fn(),
@@ -550,6 +756,7 @@ describe("local knowledge and advanced search runtime wiring", () => {
       ["search_notes", search],
     ] as const;
     const provider: ModelProvider = {
+      ...contextMocks(),
       supportsImages: false,
       supportsImageToolResults: false,
       resetConversation: vi.fn(),
@@ -625,6 +832,7 @@ describe("local knowledge and advanced search runtime wiring", () => {
     const searchNotesAdvanced = vi.fn();
     const activity = vi.fn<RuntimeHandlers["onToolActivity"]>();
     const provider: ModelProvider = {
+      ...contextMocks(),
       supportsImages: false,
       supportsImageToolResults: false,
       resetConversation: vi.fn(),
@@ -690,6 +898,7 @@ describe("local knowledge and advanced search runtime wiring", () => {
       return { toolCalls: [] };
     });
     const provider: ModelProvider = {
+      ...contextMocks(),
       supportsImages: false,
       supportsImageToolResults: false,
       resetConversation: vi.fn(),

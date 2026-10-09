@@ -385,6 +385,20 @@ export class NotalithChatView extends ItemView {
             this.renderToolActivities(assistantEl, assistantMessage);
           },
           onUsage: (usage) => this.renderUsage(assistantEl, usage),
+          onContextActivity: (activity) => {
+            const name = "context_compaction";
+            const existing = assistantMessage.toolActivities?.find(
+              (item) => item.name === name && item.status === "running",
+            );
+            const item = {
+              name,
+              status: activity.status,
+              summary: activity.message,
+            };
+            if (existing) Object.assign(existing, item);
+            else assistantMessage.toolActivities?.push(item);
+            this.renderToolActivities(assistantEl, assistantMessage);
+          },
           onGeneratedImage: (artifact) => {
             assistantMessage.generatedImages?.push(artifact);
             this.renderGeneratedImages(assistantEl, assistantMessage);

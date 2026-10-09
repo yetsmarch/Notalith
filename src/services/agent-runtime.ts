@@ -20,6 +20,7 @@ import {
 import { ImageGenerationService, ImageSaveError } from "./image-generation";
 import { VaultService } from "./vault-service";
 import type { PropertyFilter, PropertyOperator } from "./note-search";
+import { ContextCompactor, type ContextActivity } from "./context-compaction";
 
 export interface RuntimeHandlers {
   onTextDelta(delta: string): void;
@@ -30,18 +31,28 @@ export interface RuntimeHandlers {
   }): void;
   onUsage(usage: ProviderUsage): void;
   onGeneratedImage?(artifact: GeneratedImageArtifact): void;
+  onContextActivity?(activity: ContextActivity): void;
 }
 
 export class LocalAgentRuntime {
+  private readonly contextCompactor: ContextCompactor;
+  private busy = false;
   constructor(
     private readonly settings: NotalithSettings,
     private readonly vault: VaultService,
     private readonly provider: ModelProvider,
     private readonly images?: ImageGenerationService,
-  ) {}
+  ) {
+    this.contextCompactor = new ContextCompactor(
+      provider,
+      settings.systemPrompt,
+      () => settings.contextInputBudget,
+    );
+  }
 
   resetConversation(): void {
     this.provider.resetConversation();
+    this.contextCompactor.reset();
   }
 
   async send(
@@ -50,6 +61,26 @@ export class LocalAgentRuntime {
     handlers: RuntimeHandlers,
     signal: AbortSignal,
     sourcePath = "",
+  ): Promise<void> {
+    if (this.busy)
+      throw new NotalithError(
+        "A conversation request is already running.",
+        "tool",
+      );
+    this.busy = true;
+    try {
+      await this.sendTurn(prompt, attachments, handlers, signal, sourcePath);
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  private async sendTurn(
+    prompt: string,
+    attachments: ContextAttachment[],
+    handlers: RuntimeHandlers,
+    signal: AbortSignal,
+    sourcePath: string,
   ): Promise<void> {
     const input = await this.buildInput(prompt, attachments);
     if (input.images.length && !this.provider.supportsImages) {
@@ -75,13 +106,29 @@ export class LocalAgentRuntime {
         }
 
         const toolCalls: ToolCall[] = [];
+        const estimated = await this.contextCompactor.prepare(
+          nextInput,
+          tools,
+          signal,
+          (activity) => handlers.onContextActivity?.(activity),
+        );
+        let usage: ProviderUsage | undefined;
         const providerHandlers: ProviderHandlers = {
           onTextDelta: (delta) => handlers.onTextDelta(delta),
           onToolCall: (call) => toolCalls.push(call),
-          onUsage: (usage) => handlers.onUsage(usage),
+          onUsage: (value) => {
+            usage = value;
+            handlers.onUsage(value);
+          },
         };
 
-        await this.provider.respond(nextInput, tools, providerHandlers, signal);
+        const result = await this.provider.respond(
+          nextInput,
+          tools,
+          providerHandlers,
+          signal,
+        );
+        this.contextCompactor.observe(result.usage ?? usage, estimated);
 
         if (toolCalls.length === 0) {
           this.provider.finishTurn();

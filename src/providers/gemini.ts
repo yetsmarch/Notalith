@@ -12,7 +12,8 @@ import type {
   ToolDefinition,
 } from "../types";
 import { NotalithError } from "../types";
-import type { ModelProvider } from "./provider";
+import type { ModelProvider, ProviderRequestOptions } from "./provider";
+import { ConversationHistory } from "../services/context-history";
 
 type JsonObject = Record<string, unknown>;
 
@@ -30,8 +31,14 @@ interface GeminiResponse {
 
 export class GeminiProvider implements ModelProvider {
   readonly supportsImageToolResults = false;
-  private history: GeminiContent[] = [];
-  private turnStart: number | null = null;
+  readonly context = new ConversationHistory<GeminiContent>((text) => [
+    { role: "user", parts: [{ text }] },
+    { role: "model", parts: [{ text: "Historical context noted." }] },
+  ]);
+
+  private get history(): GeminiContent[] {
+    return this.context.items;
+  }
   private pending = new Map<string, { name: string; id?: string }>();
   private nextCallId = 0;
   private conversationVersion = 0;
@@ -49,21 +56,28 @@ export class GeminiProvider implements ModelProvider {
 
   resetConversation(): void {
     this.conversationVersion++;
-    this.history = [];
-    this.turnStart = null;
+    this.context.reset();
     this.pending.clear();
   }
 
   finishTurn(): void {
-    this.turnStart = null;
+    this.context.finishTurn();
     this.pending.clear();
   }
 
   abortTurn(): void {
     this.conversationVersion++;
-    if (this.turnStart !== null) this.history.length = this.turnStart;
-    this.turnStart = null;
+    this.context.abortTurn();
     this.pending.clear();
+  }
+
+  createSummaryProvider(systemPrompt: string): ModelProvider {
+    return new GeminiProvider(
+      this.connection,
+      this.model,
+      systemPrompt,
+      this.getApiKey,
+    );
   }
 
   async testConnection(): Promise<ConnectionTestResult> {
@@ -96,16 +110,20 @@ export class GeminiProvider implements ModelProvider {
     tools: ToolDefinition[],
     handlers: ProviderHandlers,
     signal: AbortSignal,
+    options?: ProviderRequestOptions,
   ): Promise<ProviderResult> {
     this.validateConfiguration();
     if (signal.aborted) throw this.cancelledError();
     const incoming = this.toContents(input);
     const version = this.conversationVersion;
     if (input.kind === "message") {
-      this.turnStart = this.history.length;
+      this.context.beginTurn();
       this.pending.clear();
     }
     const request = {
+      ...(options?.maxOutputTokens
+        ? { generationConfig: { maxOutputTokens: options.maxOutputTokens } }
+        : {}),
       ...(this.systemPrompt
         ? { systemInstruction: { parts: [{ text: this.systemPrompt }] } }
         : {}),
@@ -167,7 +185,7 @@ export class GeminiProvider implements ModelProvider {
 
     if (signal.aborted || version !== this.conversationVersion)
       throw this.cancelledError();
-    this.history.push(...incoming, result.content);
+    this.context.append(...incoming, result.content);
     this.pending = result.pending;
     return { toolCalls: result.toolCalls, usage: result.usage };
   }
